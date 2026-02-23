@@ -6,14 +6,18 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/tools/leaderelection"
-	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/scheuk/opnsense-lb-controller/internal/config"
 	"github.com/scheuk/opnsense-lb-controller/internal/controller"
@@ -66,12 +70,6 @@ func main() {
 		_, _ = os.Stderr.WriteString("opnsense-lb-controller: neither VIP nor VIP_POOL set; using default 192.0.2.1 (dev only). Set VIP or VIP_POOL in production.\n")
 	}
 	vipAlloc := config.NewVIPAllocator(cfg)
-	managedBy := "opnsense-lb-controller"
-
-	identity, _ := os.Hostname()
-	if identity == "" {
-		identity = "opnsense-lb-controller"
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -82,36 +80,63 @@ func main() {
 		cancel()
 	}()
 
-	lock := &resourcelock.LeaseLock{
-		LeaseMeta: metav1.ObjectMeta{
-			Name:      cfg.LeaseName,
-			Namespace: cfg.LeaseNamespace,
-		},
-		Client: clientset.CoordinationV1(),
-		LockConfig: resourcelock.ResourceLockConfig{
-			Identity: identity,
-		},
+	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
+		Scheme:                  scheme.Scheme,
+		LeaderElection:          true,
+		LeaderElectionNamespace: cfg.LeaseNamespace,
+		LeaderElectionID:        cfg.LeaseName,
+	})
+	if err != nil {
+		panic(err)
 	}
 
-	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-		Lock:            lock,
-		LeaseDuration:   15 * time.Second,
-		RenewDeadline:   10 * time.Second,
-		RetryPeriod:     2 * time.Second,
-		ReleaseOnCancel: true,
-		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: func(ctx context.Context) {
-				ctrl, err := controller.NewController(restCfg, oc, cfg.LoadBalancerClass, vipAlloc, managedBy)
-				if err != nil {
-					panic(err)
-				}
-				_ = ctrl.Run(ctx)
-			},
-			OnStoppedLeading: func() {
-				cancel()
-			},
-		},
+	rec := controller.NewReconciler(
+		mgr.GetClient(),
+		mgr.GetEventRecorderFor("opnsense-lb-controller"),
+		oc,
+		vipAlloc,
+		cfg.LoadBalancerClass,
+		"opnsense-lb-controller",
+		"opnsense.org/opnsense-lb",
+	)
+
+	endpointsEnqueue := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}}}
 	})
+
+	servicesEnqueueForNode := func(cl client.Reader, loadBalancerClass string) handler.MapFunc {
+		return func(ctx context.Context, obj client.Object) []reconcile.Request {
+			var list corev1.ServiceList
+			if err := cl.List(ctx, &list); err != nil {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for i := range list.Items {
+				svc := &list.Items[i]
+				if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+					continue
+				}
+				if svc.Spec.LoadBalancerClass == nil || *svc.Spec.LoadBalancerClass != loadBalancerClass {
+					continue
+				}
+				reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}})
+			}
+			return reqs
+		}
+	}
+
+	if err := ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.Service{}).
+		WithEventFilter(controller.ServiceLoadBalancerClass(cfg.LoadBalancerClass)).
+		Watches(&corev1.Endpoints{}, endpointsEnqueue).
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(servicesEnqueueForNode(mgr.GetClient(), cfg.LoadBalancerClass))).
+		Complete(rec); err != nil {
+		panic(err)
+	}
+
+	if err := mgr.Start(ctx); err != nil {
+		panic(err)
+	}
 }
 
 func loadKubeconfig(path string) (*rest.Config, error) {
