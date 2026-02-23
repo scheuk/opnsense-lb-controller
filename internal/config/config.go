@@ -31,7 +31,7 @@ func LoadFromEnv() *Config {
 		LeaseName:               getEnv("LEASE_NAME", "opnsense-lb-controller"),
 	}
 	if pool := os.Getenv("VIP_POOL"); pool != "" {
-		for _, s := range strings.Split(pool, ",") {
+		for s := range strings.SplitSeq(pool, ",") {
 			s = strings.TrimSpace(s)
 			if s != "" {
 				c.VIPPool = append(c.VIPPool, s)

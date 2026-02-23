@@ -17,7 +17,7 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Same as Makefile: installs base golangci-lint, builds custom binary with
+      # plugins from .custom-gcl.yml (e.g. logcheck), then runs the linter.
       - name: Run linter
-        uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.8.0
+        run: make lint

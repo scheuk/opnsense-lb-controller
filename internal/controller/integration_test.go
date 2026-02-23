@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -13,8 +14,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/scheuk/opnsense-lb-controller/internal/config"
 )
@@ -63,12 +69,54 @@ func requireEnvtest(t *testing.T) {
 }
 
 func startController(ctx context.Context, cfg *rest.Config, mock *FakeOPNsense, vipAlloc config.VIPAllocator) {
-	ctrl, err := NewController(cfg, mock, "opnsense.org/opnsense-lb", vipAlloc, "opnsense-lb-controller")
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: scheme.Scheme,
+	})
 	if err != nil {
 		panic(err)
 	}
+	rec := NewReconciler(
+		mgr.GetClient(),
+		mgr.GetEventRecorderFor("opnsense-lb-controller"), //nolint:staticcheck // SA1019: migrate to GetEventRecorder
+		mock,
+		vipAlloc,
+		"opnsense.org/opnsense-lb",
+		"opnsense-lb-controller",
+		"opnsense.org/opnsense-lb",
+	)
+	endpointsEnqueue := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}}}
+	})
+	servicesEnqueueForNode := func(cl client.Reader, loadBalancerClass string) handler.MapFunc {
+		return func(ctx context.Context, obj client.Object) []reconcile.Request {
+			var list corev1.ServiceList
+			if err := cl.List(ctx, &list); err != nil {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for i := range list.Items {
+				svc := &list.Items[i]
+				if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+					continue
+				}
+				if svc.Spec.LoadBalancerClass == nil || *svc.Spec.LoadBalancerClass != loadBalancerClass {
+					continue
+				}
+				reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}})
+			}
+			return reqs
+		}
+	}
+	if err := ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.Service{}).
+		WithEventFilter(ServiceLoadBalancerClass("opnsense.org/opnsense-lb")).
+		Watches(&corev1.Endpoints{}, endpointsEnqueue). //nolint:staticcheck // SA1019: migrate to discoveryv1.EndpointSlice
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(servicesEnqueueForNode(mgr.GetClient(), "opnsense.org/opnsense-lb"))).
+		Complete(rec); err != nil {
+		panic(err)
+	}
 	go func() {
-		_ = ctrl.Run(ctx)
+		_ = mgr.Start(ctx)
 	}()
 }
 
@@ -101,30 +149,24 @@ func TestEnvtestStart(t *testing.T) {
 
 func TestIntegration_CreateService(t *testing.T) {
 	requireEnvtest(t)
-	_, client, mock, _ := testStartEnvtest()
+	_, k8sClient, mock, _ := testStartEnvtest()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	ns := "test-create-svc"
 	svcName := "lb1"
 	nodeName := "node-create-svc"
-	createNamespace(ctx, t, client, ns)
-	createNode(ctx, t, client, nodeName, "192.0.2.10")
-	createLoadBalancerService(ctx, t, client, ns, svcName, 30080)
-	createEndpoints(ctx, t, client, ns, svcName, nodeName)
+	createNamespace(ctx, t, k8sClient, ns)
+	createNode(ctx, t, k8sClient, nodeName, "192.0.2.10")
+	createLoadBalancerService(ctx, t, k8sClient, ns, svcName, 30080)
+	createEndpoints(ctx, t, k8sClient, ns, svcName, nodeName)
 
-	ip := waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
+	ip := waitForIngressIP(ctx, t, k8sClient, ns, svcName, 10*time.Second)
 	if ip != "192.0.2.1" && ip != "192.0.2.2" {
 		t.Errorf("expected ingress IP 192.0.2.1 or 192.0.2.2, got %s", ip)
 	}
 	vips := mock.VIPs()
-	hasVIP := false
-	for _, v := range vips {
-		if v == ip {
-			hasVIP = true
-			break
-		}
-	}
+	hasVIP := slices.Contains(vips, ip)
 	if !hasVIP {
 		t.Errorf("mock VIPs expected to contain %s, got %v", ip, vips)
 	}
@@ -140,7 +182,7 @@ func TestIntegration_CreateService(t *testing.T) {
 
 func TestIntegration_DeleteService_Cleanup(t *testing.T) {
 	requireEnvtest(t)
-	_, client, mock, _ := testStartEnvtest()
+	_, k8sClient, mock, _ := testStartEnvtest()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -148,28 +190,25 @@ func TestIntegration_DeleteService_Cleanup(t *testing.T) {
 	svcName := "lb2"
 	nodeName := "node-delete-svc"
 	serviceKey := ns + "/" + svcName
-	createNamespace(ctx, t, client, ns)
-	createNode(ctx, t, client, nodeName, "192.0.2.10")
-	createLoadBalancerService(ctx, t, client, ns, svcName, 30081)
-	createEndpoints(ctx, t, client, ns, svcName, nodeName)
+	createNamespace(ctx, t, k8sClient, ns)
+	createNode(ctx, t, k8sClient, nodeName, "192.0.2.10")
+	createLoadBalancerService(ctx, t, k8sClient, ns, svcName, 30081)
+	createEndpoints(ctx, t, k8sClient, ns, svcName, nodeName)
 
-	ip := waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
-	if err := client.CoreV1().Services(ns).Delete(ctx, svcName, metav1.DeleteOptions{}); err != nil {
+	ip := waitForIngressIP(ctx, t, k8sClient, ns, svcName, 10*time.Second)
+	if err := k8sClient.CoreV1().Services(ns).Delete(ctx, svcName, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("delete service: %v", err)
 	}
 	waitForNoNATRules(t, mock, serviceKey, 10*time.Second)
 	vips := mock.VIPs()
-	for _, v := range vips {
-		if v == ip {
-			t.Errorf("expected VIP %s to be released after delete, still in mock: %v", ip, vips)
-			break
-		}
+	if slices.Contains(vips, ip) {
+		t.Errorf("expected VIP %s to be released after delete, still in mock: %v", ip, vips)
 	}
 }
 
 func TestIntegration_UpdatePorts(t *testing.T) {
 	requireEnvtest(t)
-	_, client, mock, _ := testStartEnvtest()
+	_, k8sClient, mock, _ := testStartEnvtest()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -177,13 +216,13 @@ func TestIntegration_UpdatePorts(t *testing.T) {
 	svcName := "lb4"
 	nodeName := "node-update-ports"
 	serviceKey := ns + "/" + svcName
-	createNamespace(ctx, t, client, ns)
-	createNode(ctx, t, client, nodeName, "192.0.2.10")
-	createLoadBalancerService(ctx, t, client, ns, svcName, 30082)
-	createEndpoints(ctx, t, client, ns, svcName, nodeName)
+	createNamespace(ctx, t, k8sClient, ns)
+	createNode(ctx, t, k8sClient, nodeName, "192.0.2.10")
+	createLoadBalancerService(ctx, t, k8sClient, ns, svcName, 30082)
+	createEndpoints(ctx, t, k8sClient, ns, svcName, nodeName)
 
-	ip := waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
-	svc, err := client.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
+	ip := waitForIngressIP(ctx, t, k8sClient, ns, svcName, 10*time.Second)
+	svc, err := k8sClient.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get service: %v", err)
 	}
@@ -194,7 +233,7 @@ func TestIntegration_UpdatePorts(t *testing.T) {
 		NodePort:   30444,
 		Protocol:   corev1.ProtocolTCP,
 	})
-	if _, err := client.CoreV1().Services(ns).Update(ctx, svc, metav1.UpdateOptions{}); err != nil {
+	if _, err := k8sClient.CoreV1().Services(ns).Update(ctx, svc, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update service: %v", err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -209,7 +248,7 @@ func TestIntegration_UpdatePorts(t *testing.T) {
 	if len(rules) != 2 {
 		t.Fatalf("expected 2 NAT rules after adding port, got %d", len(rules))
 	}
-	svc, _ = client.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
+	svc, _ = k8sClient.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
 	if len(svc.Status.LoadBalancer.Ingress) == 0 || svc.Status.LoadBalancer.Ingress[0].IP != ip {
 		t.Errorf("expected same VIP %s after update, got %v", ip, svc.Status.LoadBalancer.Ingress)
 	}
@@ -218,21 +257,21 @@ func TestIntegration_UpdatePorts(t *testing.T) {
 func TestIntegration_ChangeLoadBalancerClass_Cleanup(t *testing.T) {
 	t.Skip("Kubernetes API does not allow changing spec.loadBalancerClass after it is set; cleanup on class change is not testable via API")
 	requireEnvtest(t)
-	_, client, mock, _ := testStartEnvtest()
+	_, k8sClient, mock, _ := testStartEnvtest()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	ns := "test-changeclass-svc"
 	svcName := "lb3"
 	serviceKey := ns + "/" + svcName
-	createNamespace(ctx, t, client, ns)
-	createNode(ctx, t, client, "node-1", "192.0.2.10")
-	createLoadBalancerService(ctx, t, client, ns, svcName, 30083)
-	createEndpoints(ctx, t, client, ns, svcName, "node-1")
+	createNamespace(ctx, t, k8sClient, ns)
+	createNode(ctx, t, k8sClient, "node-1", "192.0.2.10")
+	createLoadBalancerService(ctx, t, k8sClient, ns, svcName, 30083)
+	createEndpoints(ctx, t, k8sClient, ns, svcName, "node-1")
 
-	waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
+	waitForIngressIP(ctx, t, k8sClient, ns, svcName, 10*time.Second)
 	patch := `{"spec":{"loadBalancerClass":"other.org/lb"}}`
-	if _, err := client.CoreV1().Services(ns).Patch(ctx, svcName, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+	if _, err := k8sClient.CoreV1().Services(ns).Patch(ctx, svcName, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
 		t.Fatalf("patch service: %v", err)
 	}
 	waitForNoNATRules(t, mock, serviceKey, 10*time.Second)
@@ -240,11 +279,11 @@ func TestIntegration_ChangeLoadBalancerClass_Cleanup(t *testing.T) {
 
 func ptr(s string) *string { return &s }
 
-func waitForIngressIP(ctx context.Context, t *testing.T, client kubernetes.Interface, ns, svcName string, timeout time.Duration) string {
+func waitForIngressIP(ctx context.Context, t *testing.T, cl kubernetes.Interface, ns, svcName string, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		svc, err := client.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
+		svc, err := cl.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
 		if err != nil {
 			t.Fatalf("get service: %v", err)
 		}
@@ -269,17 +308,17 @@ func waitForNoNATRules(t *testing.T, mock *FakeOPNsense, serviceKey string, time
 	t.Fatalf("timeout waiting for no NAT rules for %s (within %v)", serviceKey, timeout)
 }
 
-func createNamespace(ctx context.Context, t *testing.T, client kubernetes.Interface, name string) *corev1.Namespace {
+func createNamespace(ctx context.Context, t *testing.T, cl kubernetes.Interface, name string) *corev1.Namespace {
 	t.Helper()
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	ns, err := client.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
+	ns, err := cl.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("create namespace: %v", err)
 	}
 	return ns
 }
 
-func createNode(ctx context.Context, t *testing.T, client kubernetes.Interface, name, internalIP string) *corev1.Node {
+func createNode(ctx context.Context, t *testing.T, cl kubernetes.Interface, name, internalIP string) *corev1.Node {
 	t.Helper()
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -289,14 +328,14 @@ func createNode(ctx context.Context, t *testing.T, client kubernetes.Interface, 
 			},
 		},
 	}
-	node, err := client.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+	node, err := cl.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("create node: %v", err)
 	}
 	return node
 }
 
-func createLoadBalancerService(ctx context.Context, t *testing.T, client kubernetes.Interface, ns, name string, nodePort int32) *corev1.Service {
+func createLoadBalancerService(ctx context.Context, t *testing.T, cl kubernetes.Interface, ns, name string, nodePort int32) *corev1.Service {
 	t.Helper()
 	if nodePort == 0 {
 		nodePort = 30080
@@ -311,18 +350,18 @@ func createLoadBalancerService(ctx context.Context, t *testing.T, client kuberne
 			},
 		},
 	}
-	svc, err := client.CoreV1().Services(ns).Create(ctx, svc, metav1.CreateOptions{})
+	svc, err := cl.CoreV1().Services(ns).Create(ctx, svc, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
 	return svc
 }
 
-func createEndpoints(ctx context.Context, t *testing.T, client kubernetes.Interface, ns, name, nodeName string) *corev1.Endpoints {
+func createEndpoints(ctx context.Context, t *testing.T, cl kubernetes.Interface, ns, name, nodeName string) *corev1.Endpoints { //nolint:staticcheck // SA1019
 	t.Helper()
-	ep := &corev1.Endpoints{
+	ep := &corev1.Endpoints{ //nolint:staticcheck // SA1019
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Subsets: []corev1.EndpointSubset{
+		Subsets: []corev1.EndpointSubset{ //nolint:staticcheck // SA1019: migrate to discoveryv1.EndpointSlice
 			{
 				Addresses: []corev1.EndpointAddress{
 					{IP: "10.0.0.1", NodeName: ptr(nodeName)},
@@ -331,7 +370,7 @@ func createEndpoints(ctx context.Context, t *testing.T, client kubernetes.Interf
 			},
 		},
 	}
-	ep, err := client.CoreV1().Endpoints(ns).Create(ctx, ep, metav1.CreateOptions{})
+	ep, err := cl.CoreV1().Endpoints(ns).Create(ctx, ep, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("create endpoints: %v", err)
 	}

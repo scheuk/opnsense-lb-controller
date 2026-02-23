@@ -9,16 +9,18 @@ import (
 	"testing"
 )
 
+const apiPathDNatSearchRule = "/api/firewall/d_nat/search_rule"
+
 func TestClient_ApplyNATRules_HTTP(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/api/firewall/d_nat/search_rule" && r.Method == http.MethodGet:
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"rows": []interface{}{}})
+		case r.URL.Path == apiPathDNatSearchRule && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"rows": []any{}})
 		case r.URL.Path == "/api/firewall/d_nat/add_rule" && r.Method == http.MethodPost:
 			w.WriteHeader(http.StatusOK)
 		case r.URL.Path == "/api/firewall/filter_base/savepoint" && r.Method == http.MethodPost:
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"revision": "123"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"revision": "123"})
 		case r.URL.Path == "/api/firewall/filter_base/apply" && r.Method == http.MethodPost:
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -47,8 +49,8 @@ func TestClient_ApplyNATRules_HTTP(t *testing.T) {
 func TestClient_ListNATRules_HTTP(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/firewall/d_nat/search_rule" && r.Method == http.MethodGet {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		if r.URL.Path == apiPathDNatSearchRule && r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"rows": []map[string]string{
 					{"uuid": "a1", "description": "opnsense-lb-controller rule1"},
 					{"uuid": "b2", "description": "other"},
@@ -86,7 +88,7 @@ func TestClient_EnsureVIP_RemoveVIP_HTTP(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/interfaces/vip_settings/search_item" && r.Method == http.MethodGet:
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"rows": []interface{}{}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"rows": []any{}})
 		case r.URL.Path == "/api/interfaces/vip_settings/add_item" && r.Method == http.MethodPost:
 			addVIPCalled = true
 			w.WriteHeader(http.StatusOK)
@@ -118,7 +120,7 @@ func TestClient_ApplyNATRules_perServiceScoping(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/firewall/d_nat/search_rule" && r.Method == http.MethodGet:
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"rows": []map[string]string{
 					{"uuid": "u1", "description": "managed-by-controller ns/svc1 192.0.2.1"},
 					{"uuid": "u2", "description": "managed-by-controller ns/svc2 192.0.2.2"},
@@ -131,7 +133,7 @@ func TestClient_ApplyNATRules_perServiceScoping(t *testing.T) {
 		case r.URL.Path == "/api/firewall/d_nat/add_rule" && r.Method == http.MethodPost:
 			w.WriteHeader(http.StatusOK)
 		case r.URL.Path == "/api/firewall/filter_base/savepoint" && r.Method == http.MethodPost:
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"revision": "123"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"revision": "123"})
 		case r.URL.Path == "/api/firewall/filter_base/apply" && r.Method == http.MethodPost:
 			w.WriteHeader(http.StatusOK)
 		default:
