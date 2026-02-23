@@ -136,6 +136,34 @@ func TestIntegration_CreateService(t *testing.T) {
 	}
 }
 
+func TestIntegration_DeleteService_Cleanup(t *testing.T) {
+	requireEnvtest(t)
+	_, client, mock, _ := testStartEnvtest()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ns := "test-delete-svc"
+	svcName := "lb2"
+	serviceKey := ns + "/" + svcName
+	createNamespace(ctx, t, client, ns)
+	createNode(ctx, t, client, "node-1", "192.0.2.10")
+	createLoadBalancerService(ctx, t, client, ns, svcName)
+	createEndpoints(ctx, t, client, ns, svcName, "node-1")
+
+	ip := waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
+	if err := client.CoreV1().Services(ns).Delete(ctx, svcName, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete service: %v", err)
+	}
+	waitForNoNATRules(t, mock, serviceKey, 10*time.Second)
+	vips := mock.VIPs()
+	for _, v := range vips {
+		if v == ip {
+			t.Errorf("expected VIP %s to be released after delete, still in mock: %v", ip, vips)
+			break
+		}
+	}
+}
+
 func ptr(s string) *string { return &s }
 
 func waitForIngressIP(ctx context.Context, t *testing.T, client kubernetes.Interface, ns, svcName string, timeout time.Duration) string {
@@ -153,6 +181,18 @@ func waitForIngressIP(ctx context.Context, t *testing.T, client kubernetes.Inter
 	}
 	t.Fatalf("timeout waiting for status.loadBalancer.ingress (within %v)", timeout)
 	return ""
+}
+
+func waitForNoNATRules(t *testing.T, mock *FakeOPNsense, serviceKey string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if len(mock.NATRulesFor(serviceKey)) == 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for no NAT rules for %s (within %v)", serviceKey, timeout)
 }
 
 func createNamespace(ctx context.Context, t *testing.T, client kubernetes.Interface, name string) *corev1.Namespace {
