@@ -59,7 +59,6 @@ type searchRuleResponse struct {
 	} `json:"rows"`
 }
 
-
 // rulePayload is sent to add_rule. Field names follow OPNsense DNat model.
 type rulePayload struct {
 	Rule struct {
@@ -313,7 +312,7 @@ func (c *client) addVIP(ctx context.Context, vip, subnet string) error {
 		"vip": map[string]string{
 			"mode":        "ipalias",
 			"interface":   "wan",
-			"subnet":     subnet,
+			"subnet":      subnet,
 			"description": "opnsense-lb-controller " + vip,
 		},
 	}

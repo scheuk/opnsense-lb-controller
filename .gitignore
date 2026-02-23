@@ -1,5 +1,6 @@
 # Binaries for programs and plugins
 bin/
+cover.out
 .idea/
 .vscode/
 .DS_Store

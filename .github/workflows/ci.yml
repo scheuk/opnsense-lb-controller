@@ -19,17 +19,14 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Install setup-envtest
-        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-
       - name: Build
-        run: go build -o /dev/null ./cmd/opnsense-lb-controller
+        run: make build
 
       - name: Run tests
         run: |
-          export PATH=$PATH:$(go env GOPATH)/bin
-          export KUBEBUILDER_ASSETS=$(setup-envtest use -p path)
-          go test ./... -v -count=1 -timeout 5m
+          export PATH="$(go env GOPATH)/bin:$(pwd)/bin:$PATH"
+          make envtest
+          make test
 
       - name: Run vet
         run: go vet ./...

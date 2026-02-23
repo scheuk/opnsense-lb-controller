@@ -72,11 +72,12 @@ Pull with: `docker pull ghcr.io/scheuk/opnsense-lb-controller:latest`
 ## Development
 
 ```bash
-go build -o bin/opnsense-lb-controller ./cmd/opnsense-lb-controller
-go test ./...
+make envtest   # install envtest binaries (one-time or when changing k8s version)
+make test      # run all tests, including envtest integration tests
+make build     # build bin/opnsense-lb-controller
 ```
 
-Integration tests use envtest and run with `go test ./...` (see [Integration testing design](docs/plans/2025-02-23-integration-testing-design.md)). To run them locally, set `KUBEBUILDER_ASSETS` (e.g. `setup-envtest use -p path`); otherwise integration tests are skipped.
+Integration tests use envtest (see [Integration testing design](docs/plans/2025-02-23-integration-testing-design.md)). Without `make envtest`, or if you run `go test ./...` directly without `KUBEBUILDER_ASSETS` set, integration tests are skipped.
 
 ## Design
 

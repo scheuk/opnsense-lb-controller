@@ -304,7 +304,7 @@ func createLoadBalancerService(ctx context.Context, t *testing.T, client kuberne
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceTypeLoadBalancer,
+			Type:              corev1.ServiceTypeLoadBalancer,
 			LoadBalancerClass: ptr("opnsense.org/opnsense-lb"),
 			Ports: []corev1.ServicePort{
 				{Name: "http", Port: 80, TargetPort: intstr.FromInt32(8080), NodePort: nodePort, Protocol: corev1.ProtocolTCP},

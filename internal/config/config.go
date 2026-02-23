@@ -69,6 +69,7 @@ type singleVIP struct{ vip string }
 
 func (s *singleVIP) Allocate(string) string { return s.vip }
 func (s *singleVIP) Release(string)         {}
+
 // GetVIP returns "" for single-VIP so the controller does not call RemoveVIP (VIP is shared).
 func (s *singleVIP) GetVIP(serviceKey string) string { return "" }
 
