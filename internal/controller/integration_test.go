@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -164,6 +165,76 @@ func TestIntegration_DeleteService_Cleanup(t *testing.T) {
 	}
 }
 
+func TestIntegration_UpdatePorts(t *testing.T) {
+	requireEnvtest(t)
+	_, client, mock, _ := testStartEnvtest()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ns := "test-update-ports"
+	svcName := "lb4"
+	serviceKey := ns + "/" + svcName
+	createNamespace(ctx, t, client, ns)
+	createNode(ctx, t, client, "node-1", "192.0.2.10")
+	createLoadBalancerService(ctx, t, client, ns, svcName)
+	createEndpoints(ctx, t, client, ns, svcName, "node-1")
+
+	ip := waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
+	svc, err := client.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
+		Name:       "https",
+		Port:       443,
+		TargetPort: intstr.FromInt32(8443),
+		NodePort:   30443,
+		Protocol:   corev1.ProtocolTCP,
+	})
+	if _, err := client.CoreV1().Services(ns).Update(ctx, svc, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update service: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		rules := mock.NATRulesFor(serviceKey)
+		if len(rules) >= 2 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	rules := mock.NATRulesFor(serviceKey)
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 NAT rules after adding port, got %d", len(rules))
+	}
+	svc, _ = client.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
+	if len(svc.Status.LoadBalancer.Ingress) == 0 || svc.Status.LoadBalancer.Ingress[0].IP != ip {
+		t.Errorf("expected same VIP %s after update, got %v", ip, svc.Status.LoadBalancer.Ingress)
+	}
+}
+
+func TestIntegration_ChangeLoadBalancerClass_Cleanup(t *testing.T) {
+	t.Skip("Kubernetes API does not allow changing spec.loadBalancerClass after it is set; cleanup on class change is not testable via API")
+	requireEnvtest(t)
+	_, client, mock, _ := testStartEnvtest()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ns := "test-changeclass-svc"
+	svcName := "lb3"
+	serviceKey := ns + "/" + svcName
+	createNamespace(ctx, t, client, ns)
+	createNode(ctx, t, client, "node-1", "192.0.2.10")
+	createLoadBalancerService(ctx, t, client, ns, svcName)
+	createEndpoints(ctx, t, client, ns, svcName, "node-1")
+
+	waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
+	patch := `{"spec":{"loadBalancerClass":"other.org/lb"}}`
+	if _, err := client.CoreV1().Services(ns).Patch(ctx, svcName, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+		t.Fatalf("patch service: %v", err)
+	}
+	waitForNoNATRules(t, mock, serviceKey, 10*time.Second)
+}
+
 func ptr(s string) *string { return &s }
 
 func waitForIngressIP(ctx context.Context, t *testing.T, client kubernetes.Interface, ns, svcName string, timeout time.Duration) string {
@@ -230,7 +301,7 @@ func createLoadBalancerService(ctx context.Context, t *testing.T, client kuberne
 			Type: corev1.ServiceTypeLoadBalancer,
 			LoadBalancerClass: ptr("opnsense.org/opnsense-lb"),
 			Ports: []corev1.ServicePort{
-				{Port: 80, TargetPort: intstr.FromInt32(8080), NodePort: 30080, Protocol: corev1.ProtocolTCP},
+				{Name: "http", Port: 80, TargetPort: intstr.FromInt32(8080), NodePort: 30080, Protocol: corev1.ProtocolTCP},
 			},
 		},
 	}
