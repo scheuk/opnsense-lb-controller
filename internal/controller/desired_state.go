@@ -32,19 +32,27 @@ func ComputeDesiredState(vip string, svc *corev1.Service, endpoints *corev1.Endp
 		return nil, nil
 	}
 	state := &DesiredState{VIP: vip}
-	var backends []Backend
+	var backendIPs []string
 	if endpoints != nil {
 		for _, sub := range endpoints.Subsets {
 			for _, addr := range sub.Addresses {
-				backends = append(backends, Backend{IP: addr.IP, Port: nodePort})
+				backendIPs = append(backendIPs, addr.IP)
 			}
 		}
 	}
 	for _, p := range svc.Spec.Ports {
+		np := p.NodePort
+		if nodePort != 0 {
+			np = nodePort
+		}
+		backends := make([]Backend, 0, len(backendIPs))
+		for _, ip := range backendIPs {
+			backends = append(backends, Backend{IP: ip, Port: np})
+		}
 		state.Rules = append(state.Rules, NATRule{
 			ExternalPort: p.Port,
 			Protocol:     string(p.Protocol),
-			Backends:     append([]Backend(nil), backends...),
+			Backends:     backends,
 		})
 	}
 	return state, nil
