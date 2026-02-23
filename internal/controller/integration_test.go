@@ -107,10 +107,11 @@ func TestIntegration_CreateService(t *testing.T) {
 
 	ns := "test-create-svc"
 	svcName := "lb1"
+	nodeName := "node-create-svc"
 	createNamespace(ctx, t, client, ns)
-	createNode(ctx, t, client, "node-1", "192.0.2.10")
-	createLoadBalancerService(ctx, t, client, ns, svcName)
-	createEndpoints(ctx, t, client, ns, svcName, "node-1")
+	createNode(ctx, t, client, nodeName, "192.0.2.10")
+	createLoadBalancerService(ctx, t, client, ns, svcName, 30080)
+	createEndpoints(ctx, t, client, ns, svcName, nodeName)
 
 	ip := waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
 	if ip != "192.0.2.1" && ip != "192.0.2.2" {
@@ -145,11 +146,12 @@ func TestIntegration_DeleteService_Cleanup(t *testing.T) {
 
 	ns := "test-delete-svc"
 	svcName := "lb2"
+	nodeName := "node-delete-svc"
 	serviceKey := ns + "/" + svcName
 	createNamespace(ctx, t, client, ns)
-	createNode(ctx, t, client, "node-1", "192.0.2.10")
-	createLoadBalancerService(ctx, t, client, ns, svcName)
-	createEndpoints(ctx, t, client, ns, svcName, "node-1")
+	createNode(ctx, t, client, nodeName, "192.0.2.10")
+	createLoadBalancerService(ctx, t, client, ns, svcName, 30081)
+	createEndpoints(ctx, t, client, ns, svcName, nodeName)
 
 	ip := waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
 	if err := client.CoreV1().Services(ns).Delete(ctx, svcName, metav1.DeleteOptions{}); err != nil {
@@ -173,11 +175,12 @@ func TestIntegration_UpdatePorts(t *testing.T) {
 
 	ns := "test-update-ports"
 	svcName := "lb4"
+	nodeName := "node-update-ports"
 	serviceKey := ns + "/" + svcName
 	createNamespace(ctx, t, client, ns)
-	createNode(ctx, t, client, "node-1", "192.0.2.10")
-	createLoadBalancerService(ctx, t, client, ns, svcName)
-	createEndpoints(ctx, t, client, ns, svcName, "node-1")
+	createNode(ctx, t, client, nodeName, "192.0.2.10")
+	createLoadBalancerService(ctx, t, client, ns, svcName, 30082)
+	createEndpoints(ctx, t, client, ns, svcName, nodeName)
 
 	ip := waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
 	svc, err := client.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
@@ -188,7 +191,7 @@ func TestIntegration_UpdatePorts(t *testing.T) {
 		Name:       "https",
 		Port:       443,
 		TargetPort: intstr.FromInt32(8443),
-		NodePort:   30443,
+		NodePort:   30444,
 		Protocol:   corev1.ProtocolTCP,
 	})
 	if _, err := client.CoreV1().Services(ns).Update(ctx, svc, metav1.UpdateOptions{}); err != nil {
@@ -224,7 +227,7 @@ func TestIntegration_ChangeLoadBalancerClass_Cleanup(t *testing.T) {
 	serviceKey := ns + "/" + svcName
 	createNamespace(ctx, t, client, ns)
 	createNode(ctx, t, client, "node-1", "192.0.2.10")
-	createLoadBalancerService(ctx, t, client, ns, svcName)
+	createLoadBalancerService(ctx, t, client, ns, svcName, 30083)
 	createEndpoints(ctx, t, client, ns, svcName, "node-1")
 
 	waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
@@ -293,15 +296,18 @@ func createNode(ctx context.Context, t *testing.T, client kubernetes.Interface, 
 	return node
 }
 
-func createLoadBalancerService(ctx context.Context, t *testing.T, client kubernetes.Interface, ns, name string) *corev1.Service {
+func createLoadBalancerService(ctx context.Context, t *testing.T, client kubernetes.Interface, ns, name string, nodePort int32) *corev1.Service {
 	t.Helper()
+	if nodePort == 0 {
+		nodePort = 30080
+	}
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceTypeLoadBalancer,
 			LoadBalancerClass: ptr("opnsense.org/opnsense-lb"),
 			Ports: []corev1.ServicePort{
-				{Name: "http", Port: 80, TargetPort: intstr.FromInt32(8080), NodePort: 30080, Protocol: corev1.ProtocolTCP},
+				{Name: "http", Port: 80, TargetPort: intstr.FromInt32(8080), NodePort: nodePort, Protocol: corev1.ProtocolTCP},
 			},
 		},
 	}
