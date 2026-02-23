@@ -15,39 +15,56 @@ import (
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
+	"github.com/scheuk/opnsense-lb-controller/internal/config"
 	"github.com/scheuk/opnsense-lb-controller/internal/controller"
 	"github.com/scheuk/opnsense-lb-controller/internal/opnsense"
 )
 
 func main() {
 	kubeconfig := flag.String("kubeconfig", "", "Path to kubeconfig; empty for in-cluster")
-	leaseNS := flag.String("lease-namespace", "default", "Namespace for leader election lease")
 	flag.Parse()
 
-	cfg, err := loadKubeconfig(*kubeconfig)
+	cfg := config.LoadFromEnv()
+	restCfg, err := loadKubeconfig(*kubeconfig)
 	if err != nil {
 		panic(err)
 	}
 
-	clientset, err := kubernetes.NewForConfig(cfg)
+	clientset, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		panic(err)
 	}
 
-	opnsenseURL := os.Getenv("OPNSENSE_URL")
-	opnsenseKey := os.Getenv("OPNSENSE_API_KEY")
-	opnsenseSecret := os.Getenv("OPNSENSE_API_SECRET")
-	vip := os.Getenv("VIP")
-	if vip == "" {
-		vip = "192.0.2.1"
+	apiKey := os.Getenv("OPNSENSE_API_KEY")
+	apiSecret := os.Getenv("OPNSENSE_API_SECRET")
+	if cfg.OPNsenseSecretName != "" {
+		sec, err := clientset.CoreV1().Secrets(cfg.OPNsenseSecretNamespace).Get(context.Background(), cfg.OPNsenseSecretName, metav1.GetOptions{})
+		if err != nil {
+			panic(err)
+		}
+		if k := sec.Data["apiKey"]; len(k) > 0 {
+			apiKey = string(k)
+		}
+		if s := sec.Data["apiSecret"]; len(s) > 0 {
+			apiSecret = string(s)
+		}
+		if apiKey == "" {
+			apiKey = string(sec.Data["key"])
+			apiSecret = string(sec.Data["secret"])
+		}
 	}
-	managedBy := "opnsense-lb-controller"
 
 	oc := opnsense.NewClient(opnsense.Config{
-		BaseURL:   opnsenseURL,
-		APIKey:    opnsenseKey,
-		APISecret: opnsenseSecret,
+		BaseURL:   cfg.OPNsenseURL,
+		APIKey:    apiKey,
+		APISecret: apiSecret,
 	})
+
+	if cfg.SingleVIP == "" && len(cfg.VIPPool) == 0 {
+		cfg.SingleVIP = "192.0.2.1"
+	}
+	vipAlloc := config.NewVIPAllocator(cfg)
+	managedBy := "opnsense-lb-controller"
 
 	identity, _ := os.Hostname()
 	if identity == "" {
@@ -65,8 +82,8 @@ func main() {
 
 	lock := &resourcelock.LeaseLock{
 		LeaseMeta: metav1.ObjectMeta{
-			Name:      "opnsense-lb-controller",
-			Namespace: *leaseNS,
+			Name:      cfg.LeaseName,
+			Namespace: cfg.LeaseNamespace,
 		},
 		Client: clientset.CoordinationV1(),
 		LockConfig: resourcelock.ResourceLockConfig{
@@ -82,7 +99,7 @@ func main() {
 		ReleaseOnCancel: true,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
-				ctrl, err := controller.NewController(cfg, oc, vip, managedBy)
+				ctrl, err := controller.NewController(restCfg, oc, cfg.LoadBalancerClass, vipAlloc, managedBy)
 				if err != nil {
 					panic(err)
 				}

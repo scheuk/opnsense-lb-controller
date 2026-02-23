@@ -18,29 +18,29 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
+	"github.com/scheuk/opnsense-lb-controller/internal/config"
 	"github.com/scheuk/opnsense-lb-controller/internal/opnsense"
 )
-
-const loadBalancerClass = "opnsense.org/opnsense-lb"
 
 // Controller reconciles LoadBalancer Services with our loadBalancerClass by
 // syncing desired NAT state to OPNsense and updating Service status.
 type Controller struct {
-	clientset   kubernetes.Interface
-	opnsense    opnsense.Client
-	svcLister   listerscorev1.ServiceLister
-	epLister    listerscorev1.EndpointsLister
-	nodeLister  listerscorev1.NodeLister
-	svcInformer cache.SharedIndexInformer
-	epInformer  cache.SharedIndexInformer
+	clientset    kubernetes.Interface
+	opnsense     opnsense.Client
+	svcLister    listerscorev1.ServiceLister
+	epLister     listerscorev1.EndpointsLister
+	nodeLister   listerscorev1.NodeLister
+	svcInformer  cache.SharedIndexInformer
+	epInformer   cache.SharedIndexInformer
 	nodeInformer cache.SharedIndexInformer
-	queue       workqueue.RateLimitingInterface
-	vip         string
-	managedBy   string
+	queue        workqueue.RateLimitingInterface
+	loadBalancerClass string
+	vipAlloc     config.VIPAllocator
+	managedBy    string
 }
 
 // NewController creates a controller that uses the given clientset and OPNsense client.
-func NewController(cfg *rest.Config, opnsenseClient opnsense.Client, vip, managedBy string) (*Controller, error) {
+func NewController(cfg *rest.Config, opnsenseClient opnsense.Client, loadBalancerClass string, vipAlloc config.VIPAllocator, managedBy string) (*Controller, error) {
 	clientset, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -52,17 +52,18 @@ func NewController(cfg *rest.Config, opnsenseClient opnsense.Client, vip, manage
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "opnsense-lb")
 
 	c := &Controller{
-		clientset:    clientset,
-		opnsense:     opnsenseClient,
-		svcLister:    informerFactory.Core().V1().Services().Lister(),
-		epLister:     informerFactory.Core().V1().Endpoints().Lister(),
-		nodeLister:   informerFactory.Core().V1().Nodes().Lister(),
-		svcInformer:  svcInformer,
-		epInformer:   epInformer,
-		nodeInformer: nodeInformer,
-		queue:        queue,
-		vip:          vip,
-		managedBy:    managedBy,
+		clientset:         clientset,
+		opnsense:          opnsenseClient,
+		svcLister:         informerFactory.Core().V1().Services().Lister(),
+		epLister:          informerFactory.Core().V1().Endpoints().Lister(),
+		nodeLister:         informerFactory.Core().V1().Nodes().Lister(),
+		svcInformer:       svcInformer,
+		epInformer:        epInformer,
+		nodeInformer:      nodeInformer,
+		queue:             queue,
+		loadBalancerClass: loadBalancerClass,
+		vipAlloc:          vipAlloc,
+		managedBy:         managedBy,
 	}
 
 	enqueue := func(obj interface{}) {
@@ -122,7 +123,7 @@ func (c *Controller) isOurService(svc *corev1.Service) bool {
 	if svc.Spec.LoadBalancerClass == nil {
 		return false
 	}
-	return *svc.Spec.LoadBalancerClass == loadBalancerClass
+	return *svc.Spec.LoadBalancerClass == c.loadBalancerClass
 }
 
 func (c *Controller) enqueueEndpoints(obj interface{}) {
@@ -186,12 +187,19 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	svc, err := c.svcLister.Services(ns).Get(name)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
+			c.vipAlloc.Release(key)
 			return nil
 		}
 		return err
 	}
 	if !c.isOurService(svc) {
+		c.vipAlloc.Release(key)
 		return nil
+	}
+
+	vip := c.vipAlloc.Allocate(key)
+	if vip == "" {
+		return fmt.Errorf("no VIP available for %s", key)
 	}
 
 	ep, err := c.epLister.Endpoints(ns).Get(name)
@@ -211,7 +219,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 		}
 		return "", false
 	}
-	state, err := ComputeDesiredState(c.vip, svc, ep, 0, getNodeIP)
+	state, err := ComputeDesiredState(vip, svc, ep, 0, getNodeIP)
 	if err != nil {
 		return err
 	}
