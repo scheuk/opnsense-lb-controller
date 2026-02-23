@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opnsense-lb-controller
+  namespace: opnsense-lb-controller
+  labels:
+    app.kubernetes.io/name: opnsense-lb-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opnsense-lb-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opnsense-lb-controller
+    spec:
+      serviceAccountName: opnsense-lb-controller
+      containers:
+        - name: controller
+          image: ghcr.io/scheuk/opnsense-lb-controller:latest
+          imagePullPolicy: Always
+          command: ["/opnsense-lb-controller"]
+          env:
+            - name: OPNSENSE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: opnsense-lb-controller-api
+                  key: url
+                  optional: true
+            - name: OPNSENSE_SECRET_NAME
+              value: "opnsense-lb-controller-api"
+            - name: OPNSENSE_SECRET_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: VIP
+              value: "192.0.2.1"
+            - name: LOAD_BALANCER_CLASS
+              value: "opnsense.org/opnsense-lb"
+            - name: LEASE_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+      restartPolicy: Always
