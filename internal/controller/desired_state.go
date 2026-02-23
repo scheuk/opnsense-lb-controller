@@ -23,11 +23,15 @@ type Backend struct {
 	Port int32
 }
 
+// NodeIPResolver returns the internal IP for a node by name, or false if not found.
+type NodeIPResolver func(nodeName string) (internalIP string, ok bool)
+
 // ComputeDesiredState builds the desired NAT state from a Service and its Endpoints.
 // vip is the virtual IP to use. For each LoadBalancer port, one NATRule is built with
-// backends from Endpoints (Addresses[].IP) and nodePort. Nil or empty Endpoints yield
-// rules with empty Backends.
-func ComputeDesiredState(vip string, svc *corev1.Service, endpoints *corev1.Endpoints, nodePort int32) (*DesiredState, error) {
+// backends from Endpoints. When getNodeIP is set, EndpointAddress.NodeName is resolved
+// to the node's internal IP for NodePort backends; otherwise addr.IP is used.
+// Nil or empty Endpoints yield rules with empty Backends.
+func ComputeDesiredState(vip string, svc *corev1.Service, endpoints *corev1.Endpoints, nodePort int32, getNodeIP NodeIPResolver) (*DesiredState, error) {
 	if svc == nil {
 		return nil, nil
 	}
@@ -36,7 +40,15 @@ func ComputeDesiredState(vip string, svc *corev1.Service, endpoints *corev1.Endp
 	if endpoints != nil {
 		for _, sub := range endpoints.Subsets {
 			for _, addr := range sub.Addresses {
-				backendIPs = append(backendIPs, addr.IP)
+				ip := addr.IP
+				if addr.NodeName != nil && getNodeIP != nil {
+					if nodeIP, ok := getNodeIP(*addr.NodeName); ok {
+						ip = nodeIP
+					}
+				}
+				if ip != "" {
+					backendIPs = append(backendIPs, ip)
+				}
 			}
 		}
 	}

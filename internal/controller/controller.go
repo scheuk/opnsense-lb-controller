@@ -8,6 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
@@ -29,8 +30,10 @@ type Controller struct {
 	opnsense    opnsense.Client
 	svcLister   listerscorev1.ServiceLister
 	epLister    listerscorev1.EndpointsLister
+	nodeLister  listerscorev1.NodeLister
 	svcInformer cache.SharedIndexInformer
 	epInformer  cache.SharedIndexInformer
+	nodeInformer cache.SharedIndexInformer
 	queue       workqueue.RateLimitingInterface
 	vip         string
 	managedBy   string
@@ -45,18 +48,21 @@ func NewController(cfg *rest.Config, opnsenseClient opnsense.Client, vip, manage
 	informerFactory := informers.NewSharedInformerFactory(clientset, 0)
 	svcInformer := informerFactory.Core().V1().Services().Informer()
 	epInformer := informerFactory.Core().V1().Endpoints().Informer()
+	nodeInformer := informerFactory.Core().V1().Nodes().Informer()
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "opnsense-lb")
 
 	c := &Controller{
-		clientset:   clientset,
-		opnsense:    opnsenseClient,
-		svcLister:   informerFactory.Core().V1().Services().Lister(),
-		epLister:    informerFactory.Core().V1().Endpoints().Lister(),
-		svcInformer: svcInformer,
-		epInformer:  epInformer,
-		queue:       queue,
-		vip:         vip,
-		managedBy:   managedBy,
+		clientset:    clientset,
+		opnsense:     opnsenseClient,
+		svcLister:    informerFactory.Core().V1().Services().Lister(),
+		epLister:     informerFactory.Core().V1().Endpoints().Lister(),
+		nodeLister:   informerFactory.Core().V1().Nodes().Lister(),
+		svcInformer:  svcInformer,
+		epInformer:   epInformer,
+		nodeInformer: nodeInformer,
+		queue:        queue,
+		vip:          vip,
+		managedBy:    managedBy,
 	}
 
 	enqueue := func(obj interface{}) {
@@ -86,8 +92,27 @@ func NewController(cfg *rest.Config, opnsenseClient opnsense.Client, vip, manage
 		UpdateFunc: func(_, newObj interface{}) { c.enqueueEndpoints(newObj) },
 		DeleteFunc: func(obj interface{}) { c.enqueueEndpoints(obj) },
 	})
+	_, _ = nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(interface{}) { c.enqueueAllManagedServices() },
+		UpdateFunc: func(_, _ interface{}) { c.enqueueAllManagedServices() },
+		DeleteFunc: func(interface{}) { c.enqueueAllManagedServices() },
+	})
 
 	return c, nil
+}
+
+func (c *Controller) enqueueAllManagedServices() {
+	svcs, err := c.svcLister.List(labels.Everything())
+	if err != nil {
+		runtime.HandleError(err)
+		return
+	}
+	for _, svc := range svcs {
+		if c.isOurService(svc) {
+			key := svc.Namespace + "/" + svc.Name
+			c.queue.Add(key)
+		}
+	}
 }
 
 func (c *Controller) isOurService(svc *corev1.Service) bool {
@@ -122,8 +147,13 @@ func (c *Controller) Run(ctx context.Context) error {
 		defer wg.Done()
 		c.epInformer.Run(ctx.Done())
 	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c.nodeInformer.Run(ctx.Done())
+	}()
 
-	if !cache.WaitForCacheSync(ctx.Done(), c.svcInformer.HasSynced, c.epInformer.HasSynced) {
+	if !cache.WaitForCacheSync(ctx.Done(), c.svcInformer.HasSynced, c.epInformer.HasSynced, c.nodeInformer.HasSynced) {
 		return fmt.Errorf("cache sync failed")
 	}
 
@@ -169,11 +199,19 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 		return err
 	}
 
-	var nodePort int32
-	if len(svc.Spec.Ports) > 0 {
-		nodePort = svc.Spec.Ports[0].NodePort
+	getNodeIP := func(nodeName string) (string, bool) {
+		node, err := c.nodeLister.Get(nodeName)
+		if err != nil {
+			return "", false
+		}
+		for _, a := range node.Status.Addresses {
+			if a.Type == corev1.NodeInternalIP {
+				return a.Address, true
+			}
+		}
+		return "", false
 	}
-	state, err := ComputeDesiredState(c.vip, svc, ep, nodePort)
+	state, err := ComputeDesiredState(c.vip, svc, ep, 0, getNodeIP)
 	if err != nil {
 		return err
 	}

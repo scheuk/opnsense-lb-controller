@@ -29,7 +29,7 @@ func TestComputeDesiredState(t *testing.T) {
 		},
 	}
 
-	got, err := ComputeDesiredState(vip, svc, ep, nodePort)
+	got, err := ComputeDesiredState(vip, svc, ep, nodePort, nil)
 	if err != nil {
 		t.Fatalf("ComputeDesiredState: %v", err)
 	}
@@ -54,5 +54,46 @@ func TestComputeDesiredState(t *testing.T) {
 	}
 	if r.Backends[0].IP != "10.0.0.1" || r.Backends[0].Port != nodePort {
 		t.Errorf("Backend: got %s:%d, want 10.0.0.1:%d", r.Backends[0].IP, r.Backends[0].Port, nodePort)
+	}
+}
+
+func TestComputeDesiredState_NodeNameResolution(t *testing.T) {
+	const vip = "192.0.2.1"
+	const nodePort = 30080
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-svc"},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeLoadBalancer,
+			Ports: []corev1.ServicePort{
+				{Port: 80, NodePort: nodePort, Protocol: corev1.ProtocolTCP},
+			},
+		},
+	}
+	nodeName := "node-1"
+	ep := &corev1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-svc"},
+		Subsets: []corev1.EndpointSubset{
+			{
+				Addresses: []corev1.EndpointAddress{
+					{IP: "10.0.0.1", NodeName: &nodeName},
+				},
+			},
+		},
+	}
+	getNodeIP := func(name string) (string, bool) {
+		if name == "node-1" {
+			return "192.168.1.10", true
+		}
+		return "", false
+	}
+	got, err := ComputeDesiredState(vip, svc, ep, nodePort, getNodeIP)
+	if err != nil {
+		t.Fatalf("ComputeDesiredState: %v", err)
+	}
+	if got == nil || len(got.Rules) != 1 || len(got.Rules[0].Backends) != 1 {
+		t.Fatalf("unexpected state: %+v", got)
+	}
+	if got.Rules[0].Backends[0].IP != "192.168.1.10" {
+		t.Errorf("Backend IP: got %s, want 192.168.1.10 (resolved from NodeName)", got.Rules[0].Backends[0].IP)
 	}
 }
