@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -13,8 +14,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/scheuk/opnsense-lb-controller/internal/config"
 )
@@ -63,12 +69,54 @@ func requireEnvtest(t *testing.T) {
 }
 
 func startController(ctx context.Context, cfg *rest.Config, mock *FakeOPNsense, vipAlloc config.VIPAllocator) {
-	ctrl, err := NewController(cfg, mock, "opnsense.org/opnsense-lb", vipAlloc, "opnsense-lb-controller")
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: scheme.Scheme,
+	})
 	if err != nil {
 		panic(err)
 	}
+	rec := NewReconciler(
+		mgr.GetClient(),
+		mgr.GetEventRecorderFor("opnsense-lb-controller"),
+		mock,
+		vipAlloc,
+		"opnsense.org/opnsense-lb",
+		"opnsense-lb-controller",
+		"opnsense.org/opnsense-lb",
+	)
+	endpointsEnqueue := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}}}
+	})
+	servicesEnqueueForNode := func(cl client.Reader, loadBalancerClass string) handler.MapFunc {
+		return func(ctx context.Context, obj client.Object) []reconcile.Request {
+			var list corev1.ServiceList
+			if err := cl.List(ctx, &list); err != nil {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for i := range list.Items {
+				svc := &list.Items[i]
+				if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+					continue
+				}
+				if svc.Spec.LoadBalancerClass == nil || *svc.Spec.LoadBalancerClass != loadBalancerClass {
+					continue
+				}
+				reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}})
+			}
+			return reqs
+		}
+	}
+	if err := ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.Service{}).
+		WithEventFilter(ServiceLoadBalancerClass("opnsense.org/opnsense-lb")).
+		Watches(&corev1.Endpoints{}, endpointsEnqueue).
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(servicesEnqueueForNode(mgr.GetClient(), "opnsense.org/opnsense-lb"))).
+		Complete(rec); err != nil {
+		panic(err)
+	}
 	go func() {
-		_ = ctrl.Run(ctx)
+		_ = mgr.Start(ctx)
 	}()
 }
 
@@ -118,13 +166,7 @@ func TestIntegration_CreateService(t *testing.T) {
 		t.Errorf("expected ingress IP 192.0.2.1 or 192.0.2.2, got %s", ip)
 	}
 	vips := mock.VIPs()
-	hasVIP := false
-	for _, v := range vips {
-		if v == ip {
-			hasVIP = true
-			break
-		}
-	}
+	hasVIP := slices.Contains(vips, ip)
 	if !hasVIP {
 		t.Errorf("mock VIPs expected to contain %s, got %v", ip, vips)
 	}
@@ -159,11 +201,8 @@ func TestIntegration_DeleteService_Cleanup(t *testing.T) {
 	}
 	waitForNoNATRules(t, mock, serviceKey, 10*time.Second)
 	vips := mock.VIPs()
-	for _, v := range vips {
-		if v == ip {
-			t.Errorf("expected VIP %s to be released after delete, still in mock: %v", ip, vips)
-			break
-		}
+	if slices.Contains(vips, ip) {
+		t.Errorf("expected VIP %s to be released after delete, still in mock: %v", ip, vips)
 	}
 }
 
