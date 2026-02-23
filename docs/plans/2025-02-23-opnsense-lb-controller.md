@@ -2,11 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Implement a Kubernetes controller that watches LoadBalancer Services with a specific loadBalancerClass, allocates a VIP, syncs NAT/port-forward rules to OPNsense via REST API, and sets Service `.status.loadBalancer.ingress`. CI via GitHub Actions; container image stored on ghcr.io.
+**Goal:** Implement a Kubernetes controller that watches LoadBalancer Services with a specific loadBalancerClass, allocates a VIP, syncs NAT/port-forward rules to OPNsense via REST API, and sets Service `.status.loadBalancer.ingress`. CI via GitHub Actions; container image stored on ghcr.io; **Helm chart** for deployment into Kubernetes.
 
-**Architecture:** Go controller with client-go informers (Service, Endpoints, Node). Per-Service reconcile; leader election; OPNsense API client for firewall DNAT and virtual IP (alias). Status written back to Service. GitHub Actions: test on push/PR, build and push image to ghcr.io on main/tag.
+**Architecture:** Go controller with client-go informers (Service, Endpoints, Node). Per-Service reconcile; leader election; OPNsense API client for firewall DNAT and virtual IP (alias). Status written back to Service. **Deployment:** raw manifests in `deploy/` and Helm chart in `helm/opnsense-lb-controller/`. GitHub Actions: test on push/PR, build and push image to ghcr.io on main/tag.
 
-**Tech Stack:** Go 1.21+, client-go, controller-runtime (or raw client-go + workqueue), OPNsense Core API (firewall d_nat, interfaces for VIP), Docker, GitHub Actions.
+**Tech Stack:** Go 1.21+, client-go, controller-runtime (or raw client-go + workqueue), OPNsense Core API (firewall d_nat, interfaces for VIP), Docker, GitHub Actions, **Helm 3**.
 
 **Design reference:** `docs/plans/2025-02-23-opnsense-lb-controller-design.md`
 
@@ -313,7 +313,42 @@ git commit -m "feat: add deploy manifests (RBAC, Deployment, example Secret)"
 
 ---
 
-## Task 12: Dockerfile
+## Task 12: Helm chart for deployment
+
+**Files:**
+- Create: `helm/opnsense-lb-controller/Chart.yaml`
+- Create: `helm/opnsense-lb-controller/values.yaml`
+- Create: `helm/opnsense-lb-controller/templates/` (Deployment, ServiceAccount, ClusterRole, ClusterRoleBinding, Secret optional, _helpers.tpl, NOTES.txt)
+
+**Step 1: Chart metadata**
+
+In `Chart.yaml`: name `opnsense-lb-controller`, version `0.1.0`, appVersion matching controller version, description one line.  
+In `values.yaml`: image (repository, tag, pullPolicy), replicaCount (default 1), opnsense (url, existingSecret name or create secret from values), loadBalancerClass (default `opnsense.org/opnsense-lb`), vip (single VIP or pool), resources, nodeSelector, tolerations, leaderElection (lease namespace/name).
+
+**Step 2: Templates**
+
+- `_helpers.tpl`: standard labels (app.kubernetes.io/name, chart, release, heritage).
+- `serviceaccount.yaml`: ServiceAccount.
+- `clusterrole.yaml` + `clusterrolebinding.yaml`: same permissions as deploy/rbac.yaml (services, endpoints, nodes, services/status, leases).
+- `deployment.yaml`: Deployment with image from values, env from ConfigMap/Secret (OPNSENSE_URL, secret ref for key/secret), args/flags for loadBalancerClass and VIP. Leader election lease in same namespace as release.
+- `secret.yaml`: optional — create Secret for OPNsense API key from values (opnsense.apiKey, opnsense.apiSecret) when existingSecret not set; otherwise use value opnsense.existingSecret.
+- `NOTES.txt`: post-install instructions (create LoadBalancer Service with loadBalancerClass, link to docs).
+
+**Step 3: Lint and template**
+
+Run: `helm lint helm/opnsense-lb-controller` and `helm template opnsense-lb-controller helm/opnsense-lb-controller -f helm/opnsense-lb-controller/values.yaml`  
+Expected: no errors, valid YAML.
+
+**Step 4: Commit**
+
+```bash
+git add helm/
+git commit -m "feat: add Helm chart for controller deployment"
+```
+
+---
+
+## Task 13: Dockerfile
 
 **Files:**
 - Create: `Dockerfile`
@@ -338,7 +373,7 @@ git commit -m "feat: add multi-stage Dockerfile"
 
 ---
 
-## Task 13: GitHub Actions — CI (test on push/PR)
+## Task 14: GitHub Actions — CI (test on push/PR)
 
 **Files:**
 - Create: `.github/workflows/ci.yml`
@@ -360,7 +395,7 @@ git commit -m "ci: add GitHub Actions workflow for tests"
 
 ---
 
-## Task 14: GitHub Actions — build and push image to ghcr.io
+## Task 15: GitHub Actions — build and push image to ghcr.io
 
 **Files:**
 - Create or modify: `.github/workflows/build.yml` (or add job to ci.yml)
@@ -382,14 +417,14 @@ git commit -m "ci: build and push Docker image to ghcr.io"
 
 ---
 
-## Task 15: README and design doc link
+## Task 16: README and design doc link
 
 **Files:**
 - Modify: `README.md`
 
 **Step 1: Expand README**
 
-Sections: Description, Configuration (env/flags: OPNsense URL, Secret, loadBalancerClass, VIP), Deployment (kubectl apply -f deploy/), Usage (create LoadBalancer Service with spec.loadBalancerClass set), Container image (ghcr.io), Development (build, test), Design (link to docs/plans/2025-02-23-opnsense-lb-controller-design.md).
+Sections: Description, Configuration (env/flags: OPNsense URL, Secret, loadBalancerClass, VIP), Deployment (Helm: `helm install`, or raw `kubectl apply -f deploy/`), Usage (create LoadBalancer Service with spec.loadBalancerClass set), Container image (ghcr.io), Development (build, test), Design (link to docs/plans/2025-02-23-opnsense-lb-controller-design.md).
 
 **Step 2: Commit**
 

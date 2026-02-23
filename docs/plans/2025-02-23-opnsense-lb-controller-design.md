@@ -11,6 +11,7 @@ A Kubernetes controller that watches LoadBalancer Services with a specific `load
 - **Controller:** Single Go binary, runs as a Kubernetes Deployment (default one replica). Uses leader election so only the elected replica runs reconciliation and talks to OPNsense.
 - **Scope:** Cluster-scoped watch of Services (and Endpoints / Nodes as needed). Only Services with `type: LoadBalancer` and `spec.loadBalancerClass` matching this implementation are reconciled.
 - **Deployment:** Can run in-cluster (service account + RBAC) or out-of-cluster with kubeconfig.
+- **Deployment options:** Provide raw Kubernetes manifests (`deploy/`) and a **Helm chart** for parameterized installation (image, OPNsense URL/Secret, loadBalancerClass, VIP, replica count, resources, etc.). Chart is the recommended way to install into a cluster.
 - **Credentials:** OPNsense API key (or user/password) in a Kubernetes Secret; OPNsense base URL and Secret reference via env or ConfigMap/CLI.
 
 ## 3. Source of Desired State (LoadBalancer + loadBalancerClass)
@@ -50,6 +51,7 @@ A Kubernetes controller that watches LoadBalancer Services with a specific `load
 - **CI:** On push/PR: checkout, build Go binary, run unit tests (`go test ./...`). Optional: go vet / golangci-lint. Image build can be on main or on tag.
 - **Image:** Build on merge to main (or on release tag). Push to **GitHub Container Registry (ghcr.io)** as `ghcr.io/<org>/opnsense-lb-controller:latest` and `ghcr.io/<org>/opnsense-lb-controller:<tag>`. Use `GITHUB_TOKEN` for push.
 - **Dockerfile:** Multi-stage: build stage (Go), minimal runtime image (scratch or distroless), non-root when supported.
+- **Helm:** Chart under `helm/opnsense-lb-controller/` (or `charts/opnsense-lb-controller/`) for deployment; values for image, OPNsense config, loadBalancerClass, VIP, and common deployment knobs (replicas, resources, nodeSelector, tolerations).
 
 ---
 
