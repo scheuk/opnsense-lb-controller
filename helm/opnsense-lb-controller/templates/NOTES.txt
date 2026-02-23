@@ -1,0 +1,17 @@
+OPNsense LB Controller is installed.
+
+1. Create a Secret with your OPNsense API credentials (if not using values):
+   kubectl create secret generic opnsense-lb-controller-api -n {{ .Release.Namespace }} \
+     --from-literal=url=https://opnsense.example.com \
+     --from-literal=apiKey=YOUR_KEY \
+     --from-literal=apiSecret=YOUR_SECRET
+
+2. Create a LoadBalancer Service with the controller's loadBalancerClass:
+   spec:
+     type: LoadBalancer
+     loadBalancerClass: opnsense.org/opnsense-lb
+
+3. The controller will allocate a VIP, sync NAT rules to OPNsense, and set
+   .status.loadBalancer.ingress on the Service.
+
+See docs/plans/2025-02-23-opnsense-lb-controller-design.md for design details.
