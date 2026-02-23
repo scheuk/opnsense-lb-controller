@@ -6,9 +6,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
 	"github.com/scheuk/opnsense-lb-controller/internal/controller"
 	"github.com/scheuk/opnsense-lb-controller/internal/opnsense"
@@ -16,9 +21,15 @@ import (
 
 func main() {
 	kubeconfig := flag.String("kubeconfig", "", "Path to kubeconfig; empty for in-cluster")
+	leaseNS := flag.String("lease-namespace", "default", "Namespace for leader election lease")
 	flag.Parse()
 
 	cfg, err := loadKubeconfig(*kubeconfig)
+	if err != nil {
+		panic(err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		panic(err)
 	}
@@ -38,9 +49,9 @@ func main() {
 		APISecret: opnsenseSecret,
 	})
 
-	ctrl, err := controller.NewController(cfg, oc, vip, managedBy)
-	if err != nil {
-		panic(err)
+	identity, _ := os.Hostname()
+	if identity == "" {
+		identity = "opnsense-lb-controller"
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -52,9 +63,36 @@ func main() {
 		cancel()
 	}()
 
-	if err := ctrl.Run(ctx); err != nil {
-		panic(err)
+	lock := &resourcelock.LeaseLock{
+		LeaseMeta: metav1.ObjectMeta{
+			Name:      "opnsense-lb-controller",
+			Namespace: *leaseNS,
+		},
+		Client: clientset.CoordinationV1(),
+		LockConfig: resourcelock.ResourceLockConfig{
+			Identity: identity,
+		},
 	}
+
+	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+		Lock:            lock,
+		LeaseDuration:   15 * time.Second,
+		RenewDeadline:   10 * time.Second,
+		RetryPeriod:     2 * time.Second,
+		ReleaseOnCancel: true,
+		Callbacks: leaderelection.LeaderCallbacks{
+			OnStartedLeading: func(ctx context.Context) {
+				ctrl, err := controller.NewController(cfg, oc, vip, managedBy)
+				if err != nil {
+					panic(err)
+				}
+				_ = ctrl.Run(ctx)
+			},
+			OnStoppedLeading: func() {
+				cancel()
+			},
+		},
+	})
 }
 
 func loadKubeconfig(path string) (*rest.Config, error) {
