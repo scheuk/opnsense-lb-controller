@@ -78,6 +78,20 @@ func TestServiceLoadBalancerClass(t *testing.T) {
 		}
 	})
 
+	t.Run("LoadBalancer with nil LoadBalancerClass returns false", func(t *testing.T) {
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "no-class"},
+			Spec: corev1.ServiceSpec{
+				Type:              corev1.ServiceTypeLoadBalancer,
+				LoadBalancerClass: nil,
+			},
+		}
+		e := event.CreateEvent{Object: svc}
+		if pred.Create(e) {
+			t.Error("Create: expected false when LoadBalancerClass is nil")
+		}
+	})
+
 	t.Run("nil object returns false", func(t *testing.T) {
 		e := event.CreateEvent{Object: nil}
 		if pred.Create(e) {
