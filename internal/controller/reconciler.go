@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/scheuk/opnsense-lb-controller/internal/config"
 	"github.com/scheuk/opnsense-lb-controller/internal/opnsense"
@@ -66,7 +67,9 @@ func NewReconciler(
 // Reconcile handles a Service key (namespace/name). It ensures NAT rules and VIP
 // on OPNsense match the desired state and updates Service status. No finalizer logic.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
 	key := req.Namespace + "/" + req.Name
+	log.Info("Reconciling Service", "key", key)
 
 	var svc corev1.Service
 	if err := r.Client.Get(ctx, req.NamespacedName, &svc); err != nil {
@@ -85,9 +88,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	vip := r.VIPAlloc.Allocate(key)
 	if vip == "" {
 		r.EventRecorder.Eventf(&svc, corev1.EventTypeWarning, "NoVIP", "no VIP available for %s", key)
-		if err := UpdateServiceLoadBalancerIngress(ctx, r.Client, &svc, ""); err != nil {
-			return ctrl.Result{}, err
-		}
+		r.clearServiceStatus(ctx, req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -110,7 +111,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	state, err := ComputeDesiredState(vip, &svc, &endpoints, 0, getNodeIP)
 	if err != nil {
 		r.EventRecorder.Eventf(&svc, corev1.EventTypeWarning, "ComputeDesiredStateFailed", "ComputeDesiredState: %v", err)
-		_ = UpdateServiceLoadBalancerIngress(ctx, r.Client, &svc, "")
+		r.clearServiceStatus(ctx, req.NamespacedName)
 		return ctrl.Result{Requeue: true}, nil
 	}
 	if state == nil {
@@ -119,22 +120,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if err := r.OPNsense.EnsureVIP(ctx, state.VIP); err != nil {
 		r.EventRecorder.Eventf(&svc, corev1.EventTypeWarning, "EnsureVIPFailed", "OPNsense EnsureVIP: %v", err)
-		_ = UpdateServiceLoadBalancerIngress(ctx, r.Client, &svc, "")
+		r.clearServiceStatus(ctx, req.NamespacedName)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
 	desiredRules := desiredStateToOPNsenseRules(state, r.ManagedBy, key)
 	if err := r.OPNsense.ApplyNATRules(ctx, desiredRules, r.ManagedBy, key); err != nil {
 		r.EventRecorder.Eventf(&svc, corev1.EventTypeWarning, "ApplyNATRulesFailed", "OPNsense ApplyNATRules: %v", err)
-		_ = UpdateServiceLoadBalancerIngress(ctx, r.Client, &svc, "")
+		r.clearServiceStatus(ctx, req.NamespacedName)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	if err := UpdateServiceLoadBalancerIngress(ctx, r.Client, &svc, vip); err != nil {
-		r.EventRecorder.Eventf(&svc, corev1.EventTypeWarning, "StatusPatchFailed", "patch Service status: %v", err)
+	var svcLatest corev1.Service
+	if err := r.Client.Get(ctx, req.NamespacedName, &svcLatest); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := UpdateServiceLoadBalancerIngress(ctx, r.Client, &svcLatest, vip); err != nil {
+		r.EventRecorder.Eventf(&svcLatest, corev1.EventTypeWarning, "StatusPatchFailed", "patch Service status: %v", err)
 		return ctrl.Result{Requeue: true}, nil
 	}
-	r.EventRecorder.Eventf(&svc, corev1.EventTypeNormal, "Synced", "assigned VIP %s and synced NAT rules to OPNsense", state.VIP)
+	r.EventRecorder.Eventf(&svcLatest, corev1.EventTypeNormal, "Synced", "assigned VIP %s and synced NAT rules to OPNsense", state.VIP)
+	log.Info("Synced NAT and status for Service", "key", key)
 	return ctrl.Result{}, nil
 }
 
@@ -148,14 +154,27 @@ func (r *Reconciler) isOurService(svc *corev1.Service) bool {
 	return *svc.Spec.LoadBalancerClass == r.LoadBalancerClass
 }
 
+// clearServiceStatus re-fetches the Service and sets status.loadBalancer.ingress to [].
+func (r *Reconciler) clearServiceStatus(ctx context.Context, nn types.NamespacedName) {
+	var latest corev1.Service
+	if err := r.Client.Get(ctx, nn, &latest); err != nil {
+		return
+	}
+	_ = UpdateServiceLoadBalancerIngress(ctx, r.Client, &latest, "")
+}
+
 // cleanup removes this service's NAT rules from OPNsense, releases the VIP (for pool), and releases the allocator key.
 func (r *Reconciler) cleanup(ctx context.Context, key string) {
+	log := log.FromContext(ctx)
+	log.Info("Cleaning up NAT/VIP for key", "key", key)
 	vip := r.VIPAlloc.GetVIP(key)
 	if err := r.OPNsense.ApplyNATRules(ctx, nil, r.ManagedBy, key); err != nil {
-		// Log handled by caller if needed; no Service to attach event to
+		log.Error(err, "Cleanup ApplyNATRules failed", "key", key)
 	}
 	if vip != "" {
-		_ = r.OPNsense.RemoveVIP(ctx, vip)
+		if err := r.OPNsense.RemoveVIP(ctx, vip); err != nil {
+			log.Error(err, "Cleanup RemoveVIP failed", "key", key, "vip", vip)
+		}
 	}
 	r.VIPAlloc.Release(key)
 }
