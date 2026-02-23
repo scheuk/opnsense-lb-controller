@@ -98,6 +98,44 @@ func TestEnvtestStart(t *testing.T) {
 	// If we get here, envtest started and controller is running.
 }
 
+func TestIntegration_CreateService(t *testing.T) {
+	requireEnvtest(t)
+	_, client, mock, _ := testStartEnvtest()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ns := "test-create-svc"
+	svcName := "lb1"
+	createNamespace(ctx, t, client, ns)
+	createNode(ctx, t, client, "node-1", "192.0.2.10")
+	createLoadBalancerService(ctx, t, client, ns, svcName)
+	createEndpoints(ctx, t, client, ns, svcName, "node-1")
+
+	ip := waitForIngressIP(ctx, t, client, ns, svcName, 10*time.Second)
+	if ip != "192.0.2.1" && ip != "192.0.2.2" {
+		t.Errorf("expected ingress IP 192.0.2.1 or 192.0.2.2, got %s", ip)
+	}
+	vips := mock.VIPs()
+	hasVIP := false
+	for _, v := range vips {
+		if v == ip {
+			hasVIP = true
+			break
+		}
+	}
+	if !hasVIP {
+		t.Errorf("mock VIPs expected to contain %s, got %v", ip, vips)
+	}
+	serviceKey := ns + "/" + svcName
+	rules := mock.NATRulesFor(serviceKey)
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 NAT rule for %s, got %d", serviceKey, len(rules))
+	}
+	if rules[0].ExternalPort != 80 || rules[0].TargetIP != "192.0.2.10" || rules[0].TargetPort != 30080 {
+		t.Errorf("NAT rule: expected ExternalPort=80 TargetIP=192.0.2.10 TargetPort=30080, got %+v", rules[0])
+	}
+}
+
 func ptr(s string) *string { return &s }
 
 func waitForIngressIP(ctx context.Context, t *testing.T, client kubernetes.Interface, ns, svcName string, timeout time.Duration) string {
