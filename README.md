@@ -76,6 +76,8 @@ go build -o bin/opnsense-lb-controller ./cmd/opnsense-lb-controller
 go test ./...
 ```
 
+Integration tests use envtest and run with `go test ./...` (see [Integration testing design](docs/plans/2025-02-23-integration-testing-design.md)). To run them locally, set `KUBEBUILDER_ASSETS` (e.g. `setup-envtest use -p path`); otherwise integration tests are skipped.
+
 ## Design
 
 See [docs/plans/2025-02-23-opnsense-lb-controller-design.md](docs/plans/2025-02-23-opnsense-lb-controller-design.md) for architecture and design details.
