@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opnsense-lb-controller.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opnsense-lb-controller.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "opnsense-lb-controller.name" . }}
+  template:
+    metadata:
+      labels:
+        {{- include "opnsense-lb-controller.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "opnsense-lb-controller.name" . }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/opnsense-lb-controller"]
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "true"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: OPNSENSE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.opnsense.existingSecret | default (printf "%s-api" (include "opnsense-lb-controller.name" .)) }}
+                  key: url
+                  optional: true
+            - name: OPNSENSE_SECRET_NAME
+              value: {{ .Values.opnsense.existingSecret | default (printf "%s-api" (include "opnsense-lb-controller.name" .)) }}
+            - name: OPNSENSE_SECRET_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: VIP
+              value: {{ .Values.vip.single | quote }}
+            - name: VIP_POOL
+              value: {{ join "," .Values.vip.pool }}
+            - name: LOAD_BALANCER_CLASS
+              value: {{ .Values.loadBalancerClass | quote }}
+            - name: LEASE_NAMESPACE
+              value: {{ .Values.leaderElection.namespace | default .Release.Namespace }}
+            - name: LEASE_NAME
+              value: {{ .Values.leaderElection.name | quote }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      restartPolicy: Always

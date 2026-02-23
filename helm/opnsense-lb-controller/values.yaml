@@ -1,0 +1,28 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/scheuk/opnsense-lb-controller
+  tag: latest
+  pullPolicy: IfNotPresent
+
+opnsense:
+  url: ""
+  existingSecret: ""  # name of existing Secret with url, apiKey, apiSecret (or key, secret)
+  # When existingSecret is not set, create Secret from apiKey/apiSecret below (do not use in production)
+  apiKey: ""
+  apiSecret: ""
+
+loadBalancerClass: opnsense.org/opnsense-lb
+
+vip:
+  single: "192.0.2.1"   # single VIP for all Services
+  pool: []               # or comma-separated list of IPs for pool allocation
+
+leaderElection:
+  namespace: ""         # default: release namespace
+  name: opnsense-lb-controller
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

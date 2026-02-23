@@ -1,0 +1,10 @@
+apiVersion: v2
+name: opnsense-lb-controller
+description: Kubernetes controller that syncs LoadBalancer Services to OPNsense NAT and VIP
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - opnsense
+  - loadbalancer
+  - kubernetes
