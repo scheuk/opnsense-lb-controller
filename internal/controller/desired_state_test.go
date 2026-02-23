@@ -29,7 +29,7 @@ func TestComputeDesiredState(t *testing.T) {
 		},
 	}
 
-	got, err := ComputeDesiredState(svc, ep, nodePort)
+	got, err := ComputeDesiredState(vip, svc, ep, nodePort)
 	if err != nil {
 		t.Fatalf("ComputeDesiredState: %v", err)
 	}

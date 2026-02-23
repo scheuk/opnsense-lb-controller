@@ -1,8 +1,6 @@
 package controller
 
 import (
-	"errors"
-
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -26,8 +24,28 @@ type Backend struct {
 }
 
 // ComputeDesiredState builds the desired NAT state from a Service and its Endpoints.
-// vip is the virtual IP to use; nodePort is used when resolving backends (e.g. NodePort).
-// Returns nil, nil when not implemented (stub).
-func ComputeDesiredState(svc *corev1.Service, endpoints *corev1.Endpoints, nodePort int32) (*DesiredState, error) {
-	return nil, errors.New("not implemented")
+// vip is the virtual IP to use. For each LoadBalancer port, one NATRule is built with
+// backends from Endpoints (Addresses[].IP) and nodePort. Nil or empty Endpoints yield
+// rules with empty Backends.
+func ComputeDesiredState(vip string, svc *corev1.Service, endpoints *corev1.Endpoints, nodePort int32) (*DesiredState, error) {
+	if svc == nil {
+		return nil, nil
+	}
+	state := &DesiredState{VIP: vip}
+	var backends []Backend
+	if endpoints != nil {
+		for _, sub := range endpoints.Subsets {
+			for _, addr := range sub.Addresses {
+				backends = append(backends, Backend{IP: addr.IP, Port: nodePort})
+			}
+		}
+	}
+	for _, p := range svc.Spec.Ports {
+		state.Rules = append(state.Rules, NATRule{
+			ExternalPort: p.Port,
+			Protocol:     string(p.Protocol),
+			Backends:     append([]Backend(nil), backends...),
+		})
+	}
+	return state, nil
 }
