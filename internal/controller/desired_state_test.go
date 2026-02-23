@@ -20,9 +20,9 @@ func TestComputeDesiredState(t *testing.T) {
 			},
 		},
 	}
-	ep := &corev1.Endpoints{
+	ep := &corev1.Endpoints{ //nolint:staticcheck // SA1019: migrate to discoveryv1.EndpointSlice
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-svc"},
-		Subsets: []corev1.EndpointSubset{
+		Subsets: []corev1.EndpointSubset{ //nolint:staticcheck // SA1019
 			{
 				Addresses: []corev1.EndpointAddress{{IP: "10.0.0.1"}},
 			},
@@ -70,9 +70,9 @@ func TestComputeDesiredState_NodeNameResolution(t *testing.T) {
 		},
 	}
 	nodeName := "node-1"
-	ep := &corev1.Endpoints{
+	ep := &corev1.Endpoints{ //nolint:staticcheck // SA1019: migrate to discoveryv1.EndpointSlice
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-svc"},
-		Subsets: []corev1.EndpointSubset{
+		Subsets: []corev1.EndpointSubset{ //nolint:staticcheck // SA1019
 			{
 				Addresses: []corev1.EndpointAddress{
 					{IP: "10.0.0.1", NodeName: &nodeName},

@@ -42,7 +42,8 @@ func main() {
 	apiKey := os.Getenv("OPNSENSE_API_KEY")
 	apiSecret := os.Getenv("OPNSENSE_API_SECRET")
 	if cfg.OPNsenseSecretName != "" {
-		sec, err := clientset.CoreV1().Secrets(cfg.OPNsenseSecretNamespace).Get(context.Background(), cfg.OPNsenseSecretName, metav1.GetOptions{})
+		sec, err := clientset.CoreV1().Secrets(cfg.OPNsenseSecretNamespace).
+			Get(context.Background(), cfg.OPNsenseSecretName, metav1.GetOptions{})
 		if err != nil {
 			panic(err)
 		}
@@ -67,7 +68,9 @@ func main() {
 	if cfg.SingleVIP == "" && len(cfg.VIPPool) == 0 {
 		// Default for local/dev only; production should set VIP or VIP_POOL explicitly.
 		cfg.SingleVIP = "192.0.2.1"
-		_, _ = os.Stderr.WriteString("opnsense-lb-controller: neither VIP nor VIP_POOL set; using default 192.0.2.1 (dev only). Set VIP or VIP_POOL in production.\n")
+		_, _ = os.Stderr.WriteString(
+			"opnsense-lb-controller: neither VIP nor VIP_POOL set; using default 192.0.2.1 (dev only). " +
+				"Set VIP or VIP_POOL in production.\n")
 	}
 	vipAlloc := config.NewVIPAllocator(cfg)
 
@@ -92,7 +95,7 @@ func main() {
 
 	rec := controller.NewReconciler(
 		mgr.GetClient(),
-		mgr.GetEventRecorderFor("opnsense-lb-controller"),
+		mgr.GetEventRecorderFor("opnsense-lb-controller"), //nolint:staticcheck // SA1019: use GetEventRecorder later
 		oc,
 		vipAlloc,
 		cfg.LoadBalancerClass,
@@ -100,9 +103,11 @@ func main() {
 		"opnsense.org/opnsense-lb",
 	)
 
-	endpointsEnqueue := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}}}
-	})
+	endpointsEnqueue := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			return []reconcile.Request{
+				{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}}}
+		})
 
 	servicesEnqueueForNode := func(cl client.Reader, loadBalancerClass string) handler.MapFunc {
 		return func(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -119,7 +124,8 @@ func main() {
 				if svc.Spec.LoadBalancerClass == nil || *svc.Spec.LoadBalancerClass != loadBalancerClass {
 					continue
 				}
-				reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}})
+				reqs = append(reqs, reconcile.Request{
+					NamespacedName: types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}})
 			}
 			return reqs
 		}
@@ -128,8 +134,9 @@ func main() {
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Service{}).
 		WithEventFilter(controller.ServiceLoadBalancerClass(cfg.LoadBalancerClass)).
-		Watches(&corev1.Endpoints{}, endpointsEnqueue).
-		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(servicesEnqueueForNode(mgr.GetClient(), cfg.LoadBalancerClass))).
+		Watches(&corev1.Endpoints{}, endpointsEnqueue). //nolint:staticcheck // SA1019: migrate to discoveryv1.EndpointSlice
+		Watches(&corev1.Node{},
+			handler.EnqueueRequestsFromMapFunc(servicesEnqueueForNode(mgr.GetClient(), cfg.LoadBalancerClass))).
 		Complete(rec); err != nil {
 		panic(err)
 	}

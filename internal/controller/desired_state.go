@@ -33,7 +33,7 @@ type NodeIPResolver func(nodeName string) (internalIP string, ok bool)
 // backends from Endpoints. When getNodeIP is set, EndpointAddress.NodeName is resolved
 // to the node's internal IP for NodePort backends; otherwise addr.IP is used.
 // Nil or empty Endpoints yield rules with empty Backends.
-func ComputeDesiredState(vip string, svc *corev1.Service, endpoints *corev1.Endpoints, nodePort int32, getNodeIP NodeIPResolver) (*DesiredState, error) {
+func ComputeDesiredState(vip string, svc *corev1.Service, endpoints *corev1.Endpoints, nodePort int32, getNodeIP NodeIPResolver) (*DesiredState, error) { //nolint:staticcheck // SA1019: migrate to discoveryv1.EndpointSlice
 	if svc == nil {
 		return nil, nil
 	}
@@ -75,7 +75,11 @@ func ComputeDesiredState(vip string, svc *corev1.Service, endpoints *corev1.Endp
 // desiredStateToOPNsenseRules converts controller desired state to one opnsense.NATRule per backend.
 // Description includes managedBy and serviceKey so rules are scoped per service.
 func desiredStateToOPNsenseRules(state *DesiredState, managedBy, serviceKey string) []opnsense.NATRule {
-	var out []opnsense.NATRule
+	var capacity int
+	for _, r := range state.Rules {
+		capacity += len(r.Backends)
+	}
+	out := make([]opnsense.NATRule, 0, capacity)
 	descPrefix := managedBy + " " + serviceKey + " " + state.VIP
 	for _, r := range state.Rules {
 		for _, b := range r.Backends {

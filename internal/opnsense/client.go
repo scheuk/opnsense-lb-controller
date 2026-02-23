@@ -87,7 +87,7 @@ func (c *client) ListNATRules(ctx context.Context) ([]NATRule, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("opnsense d_nat search_rule: %s", resp.Status)
 	}
@@ -164,7 +164,7 @@ func (c *client) addRule(ctx context.Context, r NATRule, managedBy, serviceKey s
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("opnsense d_nat add_rule: %s", resp.Status)
 	}
@@ -183,7 +183,7 @@ func (c *client) delRule(ctx context.Context, uuid string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("opnsense d_nat del_rule: %s", resp.Status)
 	}
@@ -203,7 +203,7 @@ func (c *client) applyFirewall(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("opnsense filter_base savepoint: %s", resp.Status)
 	}
@@ -218,7 +218,7 @@ func (c *client) applyFirewall(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
 		return fmt.Errorf("opnsense filter_base apply: %s", resp2.Status)
 	}
@@ -289,7 +289,7 @@ func (c *client) listVIPs(ctx context.Context) ([]struct{ UUID, Subnet, Interfac
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("opnsense vip_settings search_item: %s", resp.Status)
 	}
@@ -308,7 +308,7 @@ func (c *client) addVIP(ctx context.Context, vip, subnet string) error {
 	base := strings.TrimSuffix(c.cfg.BaseURL, "/")
 	u := base + "/api/interfaces/vip_settings/add_item"
 	// OPNsense VIP add_item: mode=ipalias, interface (e.g. wan), subnet (e.g. 192.0.2.1/32), description
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"vip": map[string]string{
 			"mode":        "ipalias",
 			"interface":   "wan",
@@ -327,7 +327,7 @@ func (c *client) addVIP(ctx context.Context, vip, subnet string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("opnsense vip_settings add_item: %s", resp.Status)
 	}
@@ -339,7 +339,7 @@ func (c *client) addVIP(ctx context.Context, vip, subnet string) error {
 	if err != nil {
 		return err
 	}
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
 		return fmt.Errorf("opnsense vip_settings reconfigure: %s", resp2.Status)
 	}
@@ -358,7 +358,7 @@ func (c *client) delVIP(ctx context.Context, uuid string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("opnsense vip_settings del_item: %s", resp.Status)
 	}
@@ -367,7 +367,7 @@ func (c *client) delVIP(ctx context.Context, uuid string) error {
 	req2.SetBasicAuth(c.cfg.APIKey, c.cfg.APISecret)
 	resp2, _ := c.cfg.Client.Do(req2)
 	if resp2 != nil {
-		resp2.Body.Close()
+		_ = resp2.Body.Close()
 	}
 	return nil
 }

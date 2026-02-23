@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -68,9 +69,9 @@ func NewReconciler(
 // on OPNsense match the desired state and updates Service status. When a Service
 // is deleted, cleanup runs and the finalizer is removed so the object can be deleted.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	key := req.Namespace + "/" + req.Name
-	log.Info("Reconciling Service", "key", key)
+	logger.Info("Reconciling Service", "key", key)
 
 	var svc corev1.Service
 	if err := r.Client.Get(ctx, req.NamespacedName, &svc); err != nil {
@@ -107,7 +108,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	var endpoints corev1.Endpoints
+	var endpoints corev1.Endpoints //nolint:staticcheck // SA1019: migrate to discoveryv1.EndpointSlice
 	_ = r.Client.Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: req.Name}, &endpoints)
 
 	getNodeIP := func(nodeName string) (string, bool) {
@@ -155,7 +156,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{Requeue: true}, nil
 	}
 	r.EventRecorder.Eventf(&svcLatest, corev1.EventTypeNormal, "Synced", "assigned VIP %s and synced NAT rules to OPNsense", state.VIP)
-	log.Info("Synced NAT and status for Service", "key", key)
+	logger.Info("Synced NAT and status for Service", "key", key)
 	return ctrl.Result{}, nil
 }
 
@@ -172,10 +173,8 @@ func (r *Reconciler) isOurService(svc *corev1.Service) bool {
 // addFinalizerIfMissing adds r.FinalizerName to svc.Finalizers if not present,
 // patches the Service, and returns (true, nil) so the caller can requeue; returns (false, nil) if already present.
 func (r *Reconciler) addFinalizerIfMissing(ctx context.Context, svc *corev1.Service) (bool, error) {
-	for _, f := range svc.Finalizers {
-		if f == r.FinalizerName {
-			return false, nil
-		}
+	if slices.Contains(svc.Finalizers, r.FinalizerName) {
+		return false, nil
 	}
 	modified := svc.DeepCopy()
 	modified.Finalizers = append(modified.Finalizers, r.FinalizerName)
@@ -213,15 +212,15 @@ func (r *Reconciler) clearServiceStatus(ctx context.Context, nn types.Namespaced
 // cleanup removes this service's NAT rules from OPNsense, releases the VIP (for pool), and releases the allocator key.
 // It does not remove the finalizer; the caller removes it when handling delete. Cleanup is idempotent.
 func (r *Reconciler) cleanup(ctx context.Context, key string) {
-	log := log.FromContext(ctx)
-	log.Info("Cleaning up NAT/VIP for key", "key", key)
+	logger := log.FromContext(ctx)
+	logger.Info("Cleaning up NAT/VIP for key", "key", key)
 	vip := r.VIPAlloc.GetVIP(key)
 	if err := r.OPNsense.ApplyNATRules(ctx, nil, r.ManagedBy, key); err != nil {
-		log.Error(err, "Cleanup ApplyNATRules failed", "key", key)
+		logger.Error(err, "Cleanup ApplyNATRules failed", "key", key)
 	}
 	if vip != "" {
 		if err := r.OPNsense.RemoveVIP(ctx, vip); err != nil {
-			log.Error(err, "Cleanup RemoveVIP failed", "key", key, "vip", vip)
+			logger.Error(err, "Cleanup RemoveVIP failed", "key", key, "vip", vip)
 		}
 	}
 	r.VIPAlloc.Release(key)
