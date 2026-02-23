@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -98,6 +99,23 @@ func TestEnvtestStart(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+func waitForIngressIP(ctx context.Context, t *testing.T, client kubernetes.Interface, ns, svcName string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		svc, err := client.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get service: %v", err)
+		}
+		if len(svc.Status.LoadBalancer.Ingress) > 0 && svc.Status.LoadBalancer.Ingress[0].IP != "" {
+			return svc.Status.LoadBalancer.Ingress[0].IP
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for status.loadBalancer.ingress (within %v)", timeout)
+	return ""
+}
 
 func createNamespace(ctx context.Context, t *testing.T, client kubernetes.Interface, name string) *corev1.Namespace {
 	t.Helper()
