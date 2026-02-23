@@ -21,6 +21,11 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/opnsense-lb-controller"]
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "true"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
           env:
             - name: OPNSENSE_URL
               valueFrom:

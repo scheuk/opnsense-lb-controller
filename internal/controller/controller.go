@@ -3,19 +3,22 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	listerscorev1 "k8s.io/client-go/listers/core/v1"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 
 	"github.com/scheuk/opnsense-lb-controller/internal/config"
@@ -25,18 +28,19 @@ import (
 // Controller reconciles LoadBalancer Services with our loadBalancerClass by
 // syncing desired NAT state to OPNsense and updating Service status.
 type Controller struct {
-	clientset    kubernetes.Interface
-	opnsense     opnsense.Client
-	svcLister    listerscorev1.ServiceLister
-	epLister     listerscorev1.EndpointsLister
-	nodeLister   listerscorev1.NodeLister
-	svcInformer  cache.SharedIndexInformer
-	epInformer   cache.SharedIndexInformer
-	nodeInformer cache.SharedIndexInformer
-	queue        workqueue.RateLimitingInterface
+	clientset         kubernetes.Interface
+	opnsense          opnsense.Client
+	svcLister         listerscorev1.ServiceLister
+	epLister          listerscorev1.EndpointsLister
+	nodeLister        listerscorev1.NodeLister
+	svcInformer       cache.SharedIndexInformer
+	epInformer        cache.SharedIndexInformer
+	nodeInformer      cache.SharedIndexInformer
+	queue             workqueue.RateLimitingInterface
 	loadBalancerClass string
-	vipAlloc     config.VIPAllocator
-	managedBy    string
+	vipAlloc          config.VIPAllocator
+	managedBy         string
+	recorder          record.EventRecorder
 }
 
 // NewController creates a controller that uses the given clientset and OPNsense client.
@@ -45,6 +49,10 @@ func NewController(cfg *rest.Config, opnsenseClient opnsense.Client, loadBalance
 	if err != nil {
 		return nil, err
 	}
+	eventBroadcaster := record.NewBroadcaster()
+	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "opnsense-lb-controller"})
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientset.CoreV1().Events(metav1.NamespaceAll)})
+
 	informerFactory := informers.NewSharedInformerFactory(clientset, 0)
 	svcInformer := informerFactory.Core().V1().Services().Informer()
 	epInformer := informerFactory.Core().V1().Endpoints().Informer()
@@ -56,7 +64,7 @@ func NewController(cfg *rest.Config, opnsenseClient opnsense.Client, loadBalance
 		opnsense:          opnsenseClient,
 		svcLister:         informerFactory.Core().V1().Services().Lister(),
 		epLister:          informerFactory.Core().V1().Endpoints().Lister(),
-		nodeLister:         informerFactory.Core().V1().Nodes().Lister(),
+		nodeLister:        informerFactory.Core().V1().Nodes().Lister(),
 		svcInformer:       svcInformer,
 		epInformer:        epInformer,
 		nodeInformer:      nodeInformer,
@@ -64,6 +72,7 @@ func NewController(cfg *rest.Config, opnsenseClient opnsense.Client, loadBalance
 		loadBalancerClass: loadBalancerClass,
 		vipAlloc:          vipAlloc,
 		managedBy:         managedBy,
+		recorder:          recorder,
 	}
 
 	enqueue := func(obj interface{}) {
@@ -158,6 +167,11 @@ func (c *Controller) Run(ctx context.Context) error {
 		return fmt.Errorf("cache sync failed")
 	}
 
+	go func() {
+		<-ctx.Done()
+		c.queue.ShutDown()
+	}()
+
 	for c.processNext(ctx) {
 	}
 	return nil
@@ -186,24 +200,25 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	}
 	svc, err := c.svcLister.Services(ns).Get(name)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			c.vipAlloc.Release(key)
+		if apierrors.IsNotFound(err) {
+			c.cleanupService(ctx, key)
 			return nil
 		}
 		return err
 	}
 	if !c.isOurService(svc) {
-		c.vipAlloc.Release(key)
+		c.cleanupService(ctx, key)
 		return nil
 	}
 
 	vip := c.vipAlloc.Allocate(key)
 	if vip == "" {
+		c.recorder.Eventf(svc, corev1.EventTypeWarning, "NoVIP", "no VIP available for %s", key)
 		return fmt.Errorf("no VIP available for %s", key)
 	}
 
 	ep, err := c.epLister.Endpoints(ns).Get(name)
-	if err != nil && !strings.Contains(err.Error(), "not found") {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 
@@ -228,23 +243,47 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	}
 
 	if err := c.opnsense.EnsureVIP(ctx, state.VIP); err != nil {
+		c.recorder.Eventf(svc, corev1.EventTypeWarning, "EnsureVIPFailed", "OPNsense EnsureVIP: %v", err)
 		return err
 	}
 
-	desiredRules := desiredStateToOPNsenseRules(state, c.managedBy)
-	if err := c.opnsense.ApplyNATRules(ctx, desiredRules, c.managedBy); err != nil {
+	desiredRules := desiredStateToOPNsenseRules(state, c.managedBy, key)
+	if err := c.opnsense.ApplyNATRules(ctx, desiredRules, c.managedBy, key); err != nil {
+		c.recorder.Eventf(svc, corev1.EventTypeWarning, "ApplyNATRulesFailed", "OPNsense ApplyNATRules: %v", err)
 		return err
 	}
 
 	// Patch Service status: .status.loadBalancer.ingress = [{ ip: vip }]
 	statusPatch := []byte(fmt.Sprintf(`{"status":{"loadBalancer":{"ingress":[{"ip":%q}]}}}`, state.VIP))
 	_, err = c.clientset.CoreV1().Services(ns).Patch(ctx, name, types.MergePatchType, statusPatch, metav1.PatchOptions{}, "status")
-	return err
+	if err != nil {
+		c.recorder.Eventf(svc, corev1.EventTypeWarning, "StatusPatchFailed", "patch Service status: %v", err)
+		return err
+	}
+	c.recorder.Eventf(svc, corev1.EventTypeNormal, "Synced", "assigned VIP %s and synced NAT rules to OPNsense", state.VIP)
+	return nil
+}
+
+// cleanupService removes this service's NAT rules from OPNsense, releases the VIP (for pool), and releases the allocator key.
+func (c *Controller) cleanupService(ctx context.Context, key string) {
+	vip := c.vipAlloc.GetVIP(key)
+	// Delete this service's NAT rules (empty desired = delete only).
+	if err := c.opnsense.ApplyNATRules(ctx, nil, c.managedBy, key); err != nil {
+		runtime.HandleError(fmt.Errorf("cleanup ApplyNATRules for %s: %w", key, err))
+	}
+	if vip != "" {
+		if err := c.opnsense.RemoveVIP(ctx, vip); err != nil {
+			runtime.HandleError(fmt.Errorf("cleanup RemoveVIP %s for %s: %w", vip, key, err))
+		}
+	}
+	c.vipAlloc.Release(key)
 }
 
 // desiredStateToOPNsenseRules converts controller desired state to one opnsense.NATRule per backend.
-func desiredStateToOPNsenseRules(state *DesiredState, managedBy string) []opnsense.NATRule {
+// Description includes managedBy and serviceKey so rules are scoped per service.
+func desiredStateToOPNsenseRules(state *DesiredState, managedBy, serviceKey string) []opnsense.NATRule {
 	var out []opnsense.NATRule
+	descPrefix := managedBy + " " + serviceKey + " " + state.VIP
 	for _, r := range state.Rules {
 		for _, b := range r.Backends {
 			out = append(out, opnsense.NATRule{
@@ -252,7 +291,7 @@ func desiredStateToOPNsenseRules(state *DesiredState, managedBy string) []opnsen
 				Protocol:     r.Protocol,
 				TargetIP:     b.IP,
 				TargetPort:   int(b.Port),
-				Description:  managedBy + " " + state.VIP,
+				Description:  descPrefix,
 			})
 		}
 	}

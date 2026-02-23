@@ -21,9 +21,10 @@ type NATRule struct {
 }
 
 // Client talks to the OPNsense API for NAT and VIP management.
+// serviceKey is the Service identifier (namespace/name) used to scope NAT rules per service.
 type Client interface {
 	ListNATRules(ctx context.Context) ([]NATRule, error)
-	ApplyNATRules(ctx context.Context, desired []NATRule, managedBy string) error
+	ApplyNATRules(ctx context.Context, desired []NATRule, managedBy, serviceKey string) error
 	EnsureVIP(ctx context.Context, vip string) error
 	RemoveVIP(ctx context.Context, vip string) error
 }
@@ -102,19 +103,19 @@ func (c *client) ListNATRules(ctx context.Context) ([]NATRule, error) {
 	return rules, nil
 }
 
-func (c *client) ApplyNATRules(ctx context.Context, desired []NATRule, managedBy string) error {
-	current, err := c.listManagedRules(ctx, managedBy)
+func (c *client) ApplyNATRules(ctx context.Context, desired []NATRule, managedBy, serviceKey string) error {
+	current, err := c.listManagedRulesForService(ctx, managedBy, serviceKey)
 	if err != nil {
 		return err
 	}
-	// Delete all current managed rules by UUID, then add all desired.
+	// Delete only this service's managed rules by UUID, then add desired.
 	for _, r := range current {
 		if err := c.delRule(ctx, r.UUID); err != nil {
 			return err
 		}
 	}
 	for _, r := range desired {
-		if err := c.addRule(ctx, r, managedBy); err != nil {
+		if err := c.addRule(ctx, r, managedBy, serviceKey); err != nil {
 			return err
 		}
 	}
@@ -126,26 +127,27 @@ func (c *client) ApplyNATRules(ctx context.Context, desired []NATRule, managedBy
 	return nil
 }
 
-func (c *client) listManagedRules(ctx context.Context, managedBy string) ([]NATRule, error) {
+// listManagedRulesForService returns NAT rules whose description contains both managedBy and serviceKey.
+func (c *client) listManagedRulesForService(ctx context.Context, managedBy, serviceKey string) ([]NATRule, error) {
 	all, err := c.ListNATRules(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var out []NATRule
 	for _, r := range all {
-		if strings.Contains(r.Description, managedBy) {
+		if strings.Contains(r.Description, managedBy) && strings.Contains(r.Description, serviceKey) {
 			out = append(out, r)
 		}
 	}
 	return out, nil
 }
 
-func (c *client) addRule(ctx context.Context, r NATRule, managedBy string) error {
+func (c *client) addRule(ctx context.Context, r NATRule, managedBy, serviceKey string) error {
 	base := strings.TrimSuffix(c.cfg.BaseURL, "/")
 	u := base + "/api/firewall/d_nat/add_rule"
 	desc := r.Description
 	if desc == "" {
-		desc = fmt.Sprintf("%s %s:%d->%s:%d", managedBy, r.Protocol, r.ExternalPort, r.TargetIP, r.TargetPort)
+		desc = fmt.Sprintf("%s %s %s:%d->%s:%d", managedBy, serviceKey, r.Protocol, r.ExternalPort, r.TargetIP, r.TargetPort)
 	}
 	payload := rulePayload{}
 	payload.Rule.Description = desc

@@ -8,6 +8,8 @@ RUN CGO_ENABLED=0 go build -o /opnsense-lb-controller ./cmd/opnsense-lb-controll
 
 # Runtime stage (minimal image with CA certs for OPNsense HTTPS)
 FROM alpine:3.19
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates && \
+	adduser -D -u 65532 nonroot
 COPY --from=builder /opnsense-lb-controller /opnsense-lb-controller
+USER nonroot
 ENTRYPOINT ["/opnsense-lb-controller"]

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -37,7 +38,7 @@ func TestClient_ApplyNATRules_HTTP(t *testing.T) {
 	desired := []NATRule{
 		{ExternalPort: 80, Protocol: "tcp", TargetIP: "10.0.0.1", TargetPort: 30080, Description: "managed"},
 	}
-	err := cli.ApplyNATRules(ctx, desired, "opnsense-lb-controller")
+	err := cli.ApplyNATRules(ctx, desired, "opnsense-lb-controller", "default/my-svc")
 	if err != nil {
 		t.Fatalf("ApplyNATRules: %v", err)
 	}
@@ -109,29 +110,48 @@ func TestClient_EnsureVIP_RemoveVIP_HTTP(t *testing.T) {
 	}
 }
 
-func TestClient_listManagedRules(t *testing.T) {
+// TestClient_ApplyNATRules_perServiceScoping verifies that ApplyNATRules only deletes rules
+// for the given serviceKey (description contains both managedBy and serviceKey).
+func TestClient_ApplyNATRules_perServiceScoping(t *testing.T) {
+	var delUUIDs []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"rows": []map[string]string{
-				{"uuid": "u1", "description": "managed-by-controller x"},
-				{"uuid": "u2", "description": "other rule"},
-			},
-		})
+		switch {
+		case r.URL.Path == "/api/firewall/d_nat/search_rule" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"rows": []map[string]string{
+					{"uuid": "u1", "description": "managed-by-controller ns/svc1 192.0.2.1"},
+					{"uuid": "u2", "description": "managed-by-controller ns/svc2 192.0.2.2"},
+				},
+			})
+		case strings.HasPrefix(r.URL.Path, "/api/firewall/d_nat/del_rule/") && r.Method == http.MethodPost:
+			uuid := strings.TrimPrefix(r.URL.Path, "/api/firewall/d_nat/del_rule/")
+			delUUIDs = append(delUUIDs, uuid)
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/api/firewall/d_nat/add_rule" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/api/firewall/filter_base/savepoint" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"revision": "123"})
+		case r.URL.Path == "/api/firewall/filter_base/apply" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	defer server.Close()
 
 	cfg := Config{BaseURL: server.URL, Client: server.Client()}
-	cli := NewClient(cfg).(*client)
+	cli := NewClient(cfg)
 	ctx := context.Background()
-	rules, err := cli.listManagedRules(ctx, "managed-by-controller")
+	desired := []NATRule{
+		{ExternalPort: 80, Protocol: "tcp", TargetIP: "10.0.0.1", TargetPort: 30080, Description: "managed-by-controller ns/svc1 192.0.2.1"},
+	}
+	err := cli.ApplyNATRules(ctx, desired, "managed-by-controller", "ns/svc1")
 	if err != nil {
-		t.Fatalf("listManagedRules: %v", err)
+		t.Fatalf("ApplyNATRules: %v", err)
 	}
-	if len(rules) != 1 {
-		t.Fatalf("listManagedRules: got %d rules, want 1", len(rules))
-	}
-	if rules[0].UUID != "u1" {
-		t.Errorf("uuid: got %q", rules[0].UUID)
+	// Only u1 (ns/svc1) should be deleted, not u2 (ns/svc2).
+	if len(delUUIDs) != 1 || delUUIDs[0] != "u1" {
+		t.Errorf("ApplyNATRules deleted wrong rules: got delUUIDs=%v, want [u1]", delUUIDs)
 	}
 }

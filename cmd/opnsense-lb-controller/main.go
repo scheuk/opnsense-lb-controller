@@ -61,7 +61,9 @@ func main() {
 	})
 
 	if cfg.SingleVIP == "" && len(cfg.VIPPool) == 0 {
+		// Default for local/dev only; production should set VIP or VIP_POOL explicitly.
 		cfg.SingleVIP = "192.0.2.1"
+		_, _ = os.Stderr.WriteString("opnsense-lb-controller: neither VIP nor VIP_POOL set; using default 192.0.2.1 (dev only). Set VIP or VIP_POOL in production.\n")
 	}
 	vipAlloc := config.NewVIPAllocator(cfg)
 	managedBy := "opnsense-lb-controller"

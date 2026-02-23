@@ -50,9 +50,11 @@ func getEnv(key, defaultVal string) string {
 
 // VIPAllocator assigns a VIP for a Service. When SingleVIP is set, returns it for all;
 // otherwise allocates from VIPPool per service key and releases on Release.
+// GetVIP returns the currently allocated VIP for a service key, or "" if none.
 type VIPAllocator interface {
 	Allocate(serviceKey string) string
 	Release(serviceKey string)
+	GetVIP(serviceKey string) string
 }
 
 // NewVIPAllocator returns a VIPAllocator from config.
@@ -67,6 +69,8 @@ type singleVIP struct{ vip string }
 
 func (s *singleVIP) Allocate(string) string { return s.vip }
 func (s *singleVIP) Release(string)         {}
+// GetVIP returns "" for single-VIP so the controller does not call RemoveVIP (VIP is shared).
+func (s *singleVIP) GetVIP(serviceKey string) string { return "" }
 
 type poolAllocator struct {
 	pool   []string
@@ -102,4 +106,8 @@ func (p *poolAllocator) Release(serviceKey string) {
 	if vip != "" {
 		delete(p.used, vip)
 	}
+}
+
+func (p *poolAllocator) GetVIP(serviceKey string) string {
+	return p.assign[serviceKey]
 }
