@@ -2,6 +2,8 @@ package controller
 
 import (
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/scheuk/opnsense-lb-controller/internal/opnsense"
 )
 
 // DesiredState holds the desired NAT state for a Service: VIP and rules.
@@ -68,4 +70,23 @@ func ComputeDesiredState(vip string, svc *corev1.Service, endpoints *corev1.Endp
 		})
 	}
 	return state, nil
+}
+
+// desiredStateToOPNsenseRules converts controller desired state to one opnsense.NATRule per backend.
+// Description includes managedBy and serviceKey so rules are scoped per service.
+func desiredStateToOPNsenseRules(state *DesiredState, managedBy, serviceKey string) []opnsense.NATRule {
+	var out []opnsense.NATRule
+	descPrefix := managedBy + " " + serviceKey + " " + state.VIP
+	for _, r := range state.Rules {
+		for _, b := range r.Backends {
+			out = append(out, opnsense.NATRule{
+				ExternalPort: int(r.ExternalPort),
+				Protocol:     r.Protocol,
+				TargetIP:     b.IP,
+				TargetPort:   int(b.Port),
+				Description:  descPrefix,
+			})
+		}
+	}
+	return out
 }

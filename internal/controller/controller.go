@@ -75,7 +75,7 @@ func NewController(cfg *rest.Config, opnsenseClient opnsense.Client, loadBalance
 		recorder:          recorder,
 	}
 
-	enqueue := func(obj interface{}) {
+	enqueue := func(obj any) {
 		key, err := cache.MetaNamespaceKeyFunc(obj)
 		if err != nil {
 			runtime.HandleError(err)
@@ -85,12 +85,12 @@ func NewController(cfg *rest.Config, opnsenseClient opnsense.Client, loadBalance
 	}
 
 	_, _ = svcInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
+		AddFunc: func(obj any) {
 			if c.isOurService(obj.(*corev1.Service)) {
 				enqueue(obj)
 			}
 		},
-		UpdateFunc: func(_, newObj interface{}) {
+		UpdateFunc: func(_, newObj any) {
 			if c.isOurService(newObj.(*corev1.Service)) {
 				enqueue(newObj)
 			}
@@ -98,14 +98,14 @@ func NewController(cfg *rest.Config, opnsenseClient opnsense.Client, loadBalance
 		DeleteFunc: enqueue,
 	})
 	_, _ = epInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) { c.enqueueEndpoints(obj) },
-		UpdateFunc: func(_, newObj interface{}) { c.enqueueEndpoints(newObj) },
-		DeleteFunc: func(obj interface{}) { c.enqueueEndpoints(obj) },
+		AddFunc:    func(obj any) { c.enqueueEndpoints(obj) },
+		UpdateFunc: func(_, newObj any) { c.enqueueEndpoints(newObj) },
+		DeleteFunc: func(obj any) { c.enqueueEndpoints(obj) },
 	})
 	_, _ = nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(interface{}) { c.enqueueAllManagedServices() },
-		UpdateFunc: func(_, _ interface{}) { c.enqueueAllManagedServices() },
-		DeleteFunc: func(interface{}) { c.enqueueAllManagedServices() },
+		AddFunc:    func(any) { c.enqueueAllManagedServices() },
+		UpdateFunc: func(_, _ any) { c.enqueueAllManagedServices() },
+		DeleteFunc: func(any) { c.enqueueAllManagedServices() },
 	})
 
 	return c, nil
@@ -135,7 +135,7 @@ func (c *Controller) isOurService(svc *corev1.Service) bool {
 	return *svc.Spec.LoadBalancerClass == c.loadBalancerClass
 }
 
-func (c *Controller) enqueueEndpoints(obj interface{}) {
+func (c *Controller) enqueueEndpoints(obj any) {
 	ep, ok := obj.(*corev1.Endpoints)
 	if !ok {
 		return
@@ -147,21 +147,15 @@ func (c *Controller) enqueueEndpoints(obj interface{}) {
 // Run starts informers and the workqueue loop. It blocks until ctx is cancelled.
 func (c *Controller) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		c.svcInformer.Run(ctx.Done())
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	})
+	wg.Go(func() {
 		c.epInformer.Run(ctx.Done())
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	})
+	wg.Go(func() {
 		c.nodeInformer.Run(ctx.Done())
-	}()
+	})
 
 	if !cache.WaitForCacheSync(ctx.Done(), c.svcInformer.HasSynced, c.epInformer.HasSynced, c.nodeInformer.HasSynced) {
 		return fmt.Errorf("cache sync failed")
@@ -254,7 +248,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	}
 
 	// Patch Service status: .status.loadBalancer.ingress = [{ ip: vip }]
-	statusPatch := []byte(fmt.Sprintf(`{"status":{"loadBalancer":{"ingress":[{"ip":%q}]}}}`, state.VIP))
+	statusPatch := fmt.Appendf(nil, `{"status":{"loadBalancer":{"ingress":[{"ip":%q}]}}}`, state.VIP)
 	_, err = c.clientset.CoreV1().Services(ns).Patch(ctx, name, types.MergePatchType, statusPatch, metav1.PatchOptions{}, "status")
 	if err != nil {
 		c.recorder.Eventf(svc, corev1.EventTypeWarning, "StatusPatchFailed", "patch Service status: %v", err)
@@ -277,23 +271,4 @@ func (c *Controller) cleanupService(ctx context.Context, key string) {
 		}
 	}
 	c.vipAlloc.Release(key)
-}
-
-// desiredStateToOPNsenseRules converts controller desired state to one opnsense.NATRule per backend.
-// Description includes managedBy and serviceKey so rules are scoped per service.
-func desiredStateToOPNsenseRules(state *DesiredState, managedBy, serviceKey string) []opnsense.NATRule {
-	var out []opnsense.NATRule
-	descPrefix := managedBy + " " + serviceKey + " " + state.VIP
-	for _, r := range state.Rules {
-		for _, b := range r.Backends {
-			out = append(out, opnsense.NATRule{
-				ExternalPort: int(r.ExternalPort),
-				Protocol:     r.Protocol,
-				TargetIP:     b.IP,
-				TargetPort:   int(b.Port),
-				Description:  descPrefix,
-			})
-		}
-	}
-	return out
 }
