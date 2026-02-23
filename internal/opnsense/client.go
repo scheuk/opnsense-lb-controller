@@ -24,6 +24,8 @@ type NATRule struct {
 type Client interface {
 	ListNATRules(ctx context.Context) ([]NATRule, error)
 	ApplyNATRules(ctx context.Context, desired []NATRule, managedBy string) error
+	EnsureVIP(ctx context.Context, vip string) error
+	RemoveVIP(ctx context.Context, vip string) error
 }
 
 // Config holds OPNsense API connection settings.
@@ -218,6 +220,153 @@ func (c *client) applyFirewall(ctx context.Context) error {
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
 		return fmt.Errorf("opnsense filter_base apply: %s", resp2.Status)
+	}
+	return nil
+}
+
+// vipSearchResponse matches OPNsense interfaces/vip_settings search_item response.
+type vipSearchResponse struct {
+	Rows []struct {
+		UUID      string `json:"uuid"`
+		Subnet    string `json:"subnet"`
+		Interface string `json:"interface"`
+		Mode      string `json:"mode"`
+	} `json:"rows"`
+}
+
+// EnsureVIP ensures the given VIP exists as an IP alias on OPNsense.
+// If the VIP is already present (e.g. pre-configured), this is a no-op.
+// The VIP is tagged via description so we can identify it for RemoveVIP.
+func (c *client) EnsureVIP(ctx context.Context, vip string) error {
+	if vip == "" {
+		return nil
+	}
+	existing, err := c.listVIPs(ctx)
+	if err != nil {
+		return err
+	}
+	subnet := vip + "/32"
+	for _, r := range existing {
+		if r.Subnet == subnet {
+			return nil
+		}
+	}
+	return c.addVIP(ctx, vip, subnet)
+}
+
+// RemoveVIP removes the given VIP (IP alias) from OPNsense if we manage it.
+func (c *client) RemoveVIP(ctx context.Context, vip string) error {
+	if vip == "" {
+		return nil
+	}
+	existing, err := c.listVIPs(ctx)
+	if err != nil {
+		return err
+	}
+	subnet := vip + "/32"
+	for _, r := range existing {
+		if r.Subnet == subnet {
+			return c.delVIP(ctx, r.UUID)
+		}
+	}
+	return nil
+}
+
+func (c *client) listVIPs(ctx context.Context) ([]struct{ UUID, Subnet, Interface, Mode string }, error) {
+	base := strings.TrimSuffix(c.cfg.BaseURL, "/")
+	u := base + "/api/interfaces/vip_settings/search_item"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth(c.cfg.APIKey, c.cfg.APISecret)
+	q := req.URL.Query()
+	q.Set("current", "1")
+	q.Set("rowCount", "10000")
+	req.URL.RawQuery = q.Encode()
+	resp, err := c.cfg.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("opnsense vip_settings search_item: %s", resp.Status)
+	}
+	var out vipSearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	var result []struct{ UUID, Subnet, Interface, Mode string }
+	for _, r := range out.Rows {
+		result = append(result, struct{ UUID, Subnet, Interface, Mode string }{r.UUID, r.Subnet, r.Interface, r.Mode})
+	}
+	return result, nil
+}
+
+func (c *client) addVIP(ctx context.Context, vip, subnet string) error {
+	base := strings.TrimSuffix(c.cfg.BaseURL, "/")
+	u := base + "/api/interfaces/vip_settings/add_item"
+	// OPNsense VIP add_item: mode=ipalias, interface (e.g. wan), subnet (e.g. 192.0.2.1/32), description
+	payload := map[string]interface{}{
+		"vip": map[string]string{
+			"mode":        "ipalias",
+			"interface":   "wan",
+			"subnet":     subnet,
+			"description": "opnsense-lb-controller " + vip,
+		},
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(c.cfg.APIKey, c.cfg.APISecret)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.cfg.Client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("opnsense vip_settings add_item: %s", resp.Status)
+	}
+	// Apply interface reconfigure so the VIP is actually applied.
+	reconfURL := base + "/api/interfaces/vip_settings/reconfigure"
+	req2, _ := http.NewRequestWithContext(ctx, http.MethodPost, reconfURL, nil)
+	req2.SetBasicAuth(c.cfg.APIKey, c.cfg.APISecret)
+	resp2, err := c.cfg.Client.Do(req2)
+	if err != nil {
+		return err
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		return fmt.Errorf("opnsense vip_settings reconfigure: %s", resp2.Status)
+	}
+	return nil
+}
+
+func (c *client) delVIP(ctx context.Context, uuid string) error {
+	base := strings.TrimSuffix(c.cfg.BaseURL, "/")
+	u := base + "/api/interfaces/vip_settings/del_item/" + url.PathEscape(uuid)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(c.cfg.APIKey, c.cfg.APISecret)
+	resp, err := c.cfg.Client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("opnsense vip_settings del_item: %s", resp.Status)
+	}
+	reconfURL := base + "/api/interfaces/vip_settings/reconfigure"
+	req2, _ := http.NewRequestWithContext(ctx, http.MethodPost, reconfURL, nil)
+	req2.SetBasicAuth(c.cfg.APIKey, c.cfg.APISecret)
+	resp2, _ := c.cfg.Client.Do(req2)
+	if resp2 != nil {
+		resp2.Body.Close()
 	}
 	return nil
 }

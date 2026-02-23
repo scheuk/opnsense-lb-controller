@@ -79,6 +79,36 @@ func TestClient_ListNATRules_HTTP(t *testing.T) {
 	}
 }
 
+func TestClient_EnsureVIP_RemoveVIP_HTTP(t *testing.T) {
+	var addVIPCalled bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/interfaces/vip_settings/search_item" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"rows": []interface{}{}})
+		case r.URL.Path == "/api/interfaces/vip_settings/add_item" && r.Method == http.MethodPost:
+			addVIPCalled = true
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/api/interfaces/vip_settings/reconfigure" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{BaseURL: server.URL, Client: server.Client()}
+	cli := NewClient(cfg)
+	ctx := context.Background()
+	err := cli.EnsureVIP(ctx, "192.0.2.1")
+	if err != nil {
+		t.Fatalf("EnsureVIP: %v", err)
+	}
+	if !addVIPCalled {
+		t.Error("EnsureVIP did not call add_item")
+	}
+}
+
 func TestClient_listManagedRules(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
