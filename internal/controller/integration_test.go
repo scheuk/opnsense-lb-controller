@@ -7,6 +7,9 @@ import (
 	"sync"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -92,4 +95,72 @@ func TestMain(m *testing.M) {
 func TestEnvtestStart(t *testing.T) {
 	requireEnvtest(t)
 	// If we get here, envtest started and controller is running.
+}
+
+func ptr(s string) *string { return &s }
+
+func createNamespace(ctx context.Context, t *testing.T, client kubernetes.Interface, name string) *corev1.Namespace {
+	t.Helper()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	ns, err := client.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	return ns
+}
+
+func createNode(ctx context.Context, t *testing.T, client kubernetes.Interface, name, internalIP string) *corev1.Node {
+	t.Helper()
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{
+				{Type: corev1.NodeInternalIP, Address: internalIP},
+			},
+		},
+	}
+	node, err := client.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	return node
+}
+
+func createLoadBalancerService(ctx context.Context, t *testing.T, client kubernetes.Interface, ns, name string) *corev1.Service {
+	t.Helper()
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeLoadBalancer,
+			LoadBalancerClass: ptr("opnsense.org/opnsense-lb"),
+			Ports: []corev1.ServicePort{
+				{Port: 80, TargetPort: intstr.FromInt32(8080), NodePort: 30080, Protocol: corev1.ProtocolTCP},
+			},
+		},
+	}
+	svc, err := client.CoreV1().Services(ns).Create(ctx, svc, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+	return svc
+}
+
+func createEndpoints(ctx context.Context, t *testing.T, client kubernetes.Interface, ns, name, nodeName string) *corev1.Endpoints {
+	t.Helper()
+	ep := &corev1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Subsets: []corev1.EndpointSubset{
+			{
+				Addresses: []corev1.EndpointAddress{
+					{IP: "10.0.0.1", NodeName: ptr(nodeName)},
+				},
+				Ports: []corev1.EndpointPort{{Port: 8080, Protocol: corev1.ProtocolTCP}},
+			},
+		},
+	}
+	ep, err := client.CoreV1().Endpoints(ns).Create(ctx, ep, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create endpoints: %v", err)
+	}
+	return ep
 }
